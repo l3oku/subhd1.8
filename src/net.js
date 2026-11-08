@@ -88,16 +88,23 @@ export async function fetchText(url, options = {}) {
   const {
     method = 'GET',
     body,
-    timeoutMs = 15_000,
     redirect = 'follow',
+    timeoutMs = 15_000,
     tls13Only = false,
   } = options;
 
+  const candidates = versionsFor(url, tls13Only);
+  const overallDeadline = Date.now() + timeoutMs;
   let lastError = null;
 
-  for (const { version, family } of versionsFor(url, tls13Only)) {
+  for (const [index, { version, family }] of candidates.entries()) {
+    // 总超时是「整个请求」的上限，不是「每一轮」的上限：4 个候选平均分，
+    // 一轮失败后剩下的时间还够下一轮。否则最坏情况会叠加成 4 倍超时。
+    const remaining = overallDeadline - Date.now();
+    if (remaining <= 0) break;
+    const slot = Math.max(800, Math.floor(remaining / (candidates.length - index)));
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), slot);
     try {
       const response = await fetchWith(url, version, {
         method,
@@ -111,7 +118,10 @@ export async function fetchText(url, options = {}) {
       return { status: response.status, ok: response.ok, text, headers: response.headers, url: response.url };
     } catch (error) {
       lastError = error;
-      if (error?.name === 'AbortError') break;
+      if (error?.name === 'AbortError') {
+        // 这一轮超时：换下一个候选（IPv4 → 默认顺序，1.3 → 1.2），不再重复同一个组合
+        continue;
+      }
       const message = String(error?.cause?.message || error?.message || error);
       if (!RETRYABLE_TRANSPORT.test(message)) break;
     } finally {
