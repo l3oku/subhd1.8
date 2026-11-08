@@ -18,10 +18,13 @@ export async function searchMeta(type, query, { year = null } = {}) {
   const text = String(query || '').trim();
   if (!text) return null;
   const key = `cinemeta-search:${kind}:${text.toLowerCase()}:${year || ''}`;
+  // Cinemeta 的排序对年份不敏感：搜「奥德赛」只会给 2016 那部，搜「奥德赛 2026」才把 2026 那条
+  // 排到第一。所以年份要直接拼进查询词。
+  const searchText = year ? `${text} ${year}` : text;
 
   return metaCache.wrap(key, async () => {
     try {
-      const url = `${CINEMETA}/catalog/${kind}/top/search=${encodeURIComponent(text)}.json`;
+      const url = `${CINEMETA}/catalog/${kind}/top/search=${encodeURIComponent(searchText)}.json`;
       const response = await fetchText(url, { accept: 'application/json', timeoutMs: 8000 });
       if (!response.ok) return null;
       const body = JSON.parse(response.text);
@@ -35,7 +38,9 @@ export async function searchMeta(type, query, { year = null } = {}) {
           if (name === expected) score += 3;
           else if (name.includes(expected) || expected.includes(name)) score += 1;
           const metaYear = Number(String(meta.releaseInfo || '').match(/\d{4}/)?.[0]) || null;
-          if (year && metaYear === Number(year)) score += 2;
+          // 年份对得上最重要：同名不同年的片子（奥德赛 2026 / 2016）光看名字会选错
+          if (year && metaYear === Number(year)) score += 5;
+          else if (year && metaYear) score -= 2;
           return { meta, score };
         })
         .sort((a, b) => b.score - a.score);
