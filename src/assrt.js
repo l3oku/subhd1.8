@@ -21,6 +21,7 @@ import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import { extOfUrl, loadArchive } from './files.js';
 import { checkIdentity, episodeRank, isWholeShow, normalize, seasonInfo } from './match.js';
+import { isProxyEnabled, proxyFetchBinary } from './proxy-cf.js';
 import { aliasesFor } from './aliases.js';
 
 export const isAssrtEnabled = () => true;
@@ -353,18 +354,32 @@ export async function assrtArchive(item, refererDomain) {
 
     const downloadHref = assrtDownloadHref(entry);
     if (!downloadHref) throw new Error('这条字幕没有下载地址');
-    const response = await webGet(downloadHref, { referer: `https://${refererDomain || config.assrt.domains[0]}/` });
-    // webGet 只拿文本（确认链接活着）；真正的二进制用 fetchBinary 再取一次，
-    // 它会跟着 302 去到 file0.assrt.net。
-    void response;
+    // 以前这里先用 webGet 以 5 秒超时「预检」一次，失败就直接抛错 —— 下载包本来就慢，
+    // 预检经常超时，导致明明能下的字幕被报成失败。现在直接下，失败再换镜像。
     const { fetchBinary } = await import('./net.js');
-    const base = refererDomain || config.assrt.domains[0];
-    const raw = await fetchBinary(`https://${base}${downloadHref}`, {
-      maxBytes: 128 * 1024 * 1024,
-      timeoutMs: 40_000,
-      referer: `https://${base}/sub/`,
-    });
-    return { raw, filename: entry.filename || decodeTail(downloadHref) || `assrt-${entry.id}.zip` };
+    const bases = [
+      refererDomain || config.assrt.domains[0],
+      ...config.assrt.domains.filter((domain) => domain !== (refererDomain || config.assrt.domains[0])),
+    ];
+    let lastError = null;
+    for (const base of bases) {
+      try {
+        const target = `https://${base}${downloadHref}`;
+        // 和迅雷一样：从机房直连 assrt.net 经常 headers timeout，配了 CF 代理就走代理
+        const raw = isProxyEnabled()
+          ? await proxyFetchBinary(target, { timeoutMs: 25_000, maxBytes: 128 * 1024 * 1024 })
+          : await fetchBinary(target, {
+              maxBytes: 128 * 1024 * 1024,
+              timeoutMs: 25_000,
+              referer: `https://${base}/sub/`,
+            });
+        return { raw, filename: entry.filename || decodeTail(downloadHref) || `assrt-${entry.id}.zip` };
+      } catch (error) {
+        lastError = error;
+        logSource('assrt', `${base} 下载失败，换下一个镜像：${error.message.slice(-60)}`);
+      }
+    }
+    throw lastError || new Error('射手（伪）下载失败');
   });
 }
 
