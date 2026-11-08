@@ -6,6 +6,7 @@
 //   - 最新：迅雷没有「最新」接口（它只按名字搜），最新列表只有射手（伪）有（/xml/list/sub/）。
 import { TtlCache } from './cache.js';
 import { searchMeta } from './meta.js';
+import { aliasesFor } from './aliases.js';
 import { logSource } from './net.js';
 import { searchThunder } from './thunder.js';
 import { parseSimpleName } from './thunder.js';
@@ -46,6 +47,44 @@ const MAX_LOOKUPS = 12;
 // 名字里「像片名」的那一段：太长的是完整发布名，短名字（一个词）像是随手起的文件名
 const usableName = (title) => /[\p{Script=Han}]/u.test(title) ? title.length >= 2 && title.length <= 60 : title.length >= 3 && title.split(/\s+/).length <= 8;
 
+// 「用户输入的关键词 → 该拿去迅雷搜的几个词」。
+// 迅雷的接口要求关键词能「完整对上」：搜 `The Odyssey` 有 57 条，搜 `Odyssey` 是 0 条
+// （它不会做模糊匹配），所以这里除了原名和中文译名，还补上「the/a/an + 原名」和「原名 + 年份」
+// 这些常见写法。能查到的片子再补它自己的中英文名。
+async function thunderSearchTerms(keyword) {
+  const raw = String(keyword || '').trim();
+  const terms = new Set();
+  const add = (value) => {
+    const text = String(value || '').trim();
+    if (text && !terms.has(text)) terms.add(text);
+  };
+
+  add(raw);
+  // 「Odyssey」→「The Odyssey」：迅雷那边片名常常带冠词
+  if (!/^(the|a|an)\s/i.test(raw)) add(`The ${raw}`);
+  else add(raw.replace(/^(the|a|an)\s+/i, ''));
+
+  try {
+    const hit = await searchMeta('movie', raw);
+    const names = [hit?.name, hit?.originalName].filter(Boolean);
+    for (const name of names) {
+      const clean = String(name).replace(/\s*\(\d{4}\)\s*$/, '').trim();
+      add(clean);
+      if (!/^(the|a|an)\s/i.test(clean)) add(`The ${clean}`);
+      for (const alias of aliasesFor(clean)) add(alias);
+    }
+    const year = Number(String(hit?.releaseInfo || '').match(/(19|20)\d{2}/)?.[0]) || null;
+    if (year) {
+      add(`${raw} ${year}`);
+      if (hit?.name) add(`${String(hit.name).replace(/\s*\(\d{4}\)\s*$/, '')} ${year}`);
+    }
+  } catch {
+    // 查不到就只按原词和补全的写法搜
+  }
+
+  return [...terms].slice(0, 4);
+}
+
 export async function sourceCatalog({ type, source, kind, keyword = '', skip = 0 }) {
   const metas = [];
   const seen = new Set();
@@ -59,7 +98,11 @@ export async function sourceCatalog({ type, source, kind, keyword = '', skip = 0
     if (!keyword) return metas;
 
     if (source === 'thunder') {
-      const items = await searchThunder(keyword);
+      // 迅雷的字幕库基本只认中文名：搜「沙丘」58 条，搜「Dune」/「Odyssey」都是 0 条。
+      // 用户在目录里输入的可能是英文片名，所以先用 Cinemeta 查一下，拿它的中文译名一起搜。
+      const terms = await thunderSearchTerms(keyword);
+      const batches = await Promise.allSettled(terms.map((term) => searchThunder(term)));
+      const items = batches.flatMap((batch) => (batch.status === 'fulfilled' ? batch.value : []));
       const works = [];
       const seenWorks = new Set();
       for (const item of items) {
