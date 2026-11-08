@@ -14,7 +14,19 @@ import { isProxyEnabled, proxyFetchText } from './proxy-cf.js';
 import { parseVideoId } from './parse.js';
 import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
-import { checkIdentity, cleanTitle, episodeInfo, episodeRank, firstYear, isWholeShow, normalize, seasonInfo } from './match.js';
+import {
+  checkIdentity,
+  cjkTrailingNumber,
+  cleanTitle,
+  episodeInfo,
+  episodeRank,
+  firstYear,
+  isTruncatedName,
+  isWholeShow,
+  looksNotFilm,
+  normalize,
+  seasonInfo,
+} from './match.js';
 import { aliasesFor, englishFor } from './aliases.js';
 
 export const isThunderEnabled = () => true;
@@ -400,94 +412,125 @@ export async function thunderSubtitles({ type, id, baseUrl }) {
     return [];
   }
 
-  const wanted = {
-    type,
-    title: meta.name,
-    year: firstYear(meta.releaseInfo),
-    season,
-    episode,
-    // 中文译名：既用来搜（「沙特阿拉伯」这种英文名搜不到的），也用来认出中文条目
-    aliases: aliasesFor(meta.name),
+  const year = firstYear(meta.releaseInfo);
+  const aliases = aliasesFor(meta.name);
+  const want = { titles: [meta.name], aliases, year, type, season, episode };
+
+  // ── 1) 搜索：英文名 / 中文译名 / 带季集或年份。
+  //    照抄 xunlei-subtitle 的做法 —— 站点是模糊搜索，**关键词里带上季集号或年份，它自己就能
+  //    把片子认出来**（「越狱 S01E12」「Oppenheimer 2023」）。先试最具体的写法。
+  const marker = season && episode ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : '';
+  const queries = [];
+  const add = (value) => {
+    const text = String(value || '').trim();
+    if (text.length >= 2 && !queries.includes(text)) queries.push(text);
   };
+  for (const base of [meta.name, ...aliases]) {
+    if (marker) add(`${base} ${marker}`);
+    if (year) add(`${base} ${year}`);
+    add(base);
+  }
 
-  const names = [
-    ...titleVariants(meta.name, wanted.year),
-    // 中文译名优先于「只写片名」：迅雷的字幕库按中文名建索引，Dune 搜不到，沙丘一搜一大把
-    ...(wanted.aliases.length > 0 && wanted.year ? wanted.aliases.map((alias) => `${alias} ${wanted.year}`) : []),
-    ...(meta.originalName && meta.originalName !== meta.name ? titleVariants(meta.originalName, wanted.year) : []),
-    ...wanted.aliases,
-  ];
-
-  const picked = new Map();
-  const collect = (items) => {
-    let matched = 0;
-    for (const item of items) {
-      const url = String(item.url || '');
-      if (!url || picked.has(url)) continue;
-      // 判定完全走 match.js：片名（英文 + 中文译名）→ 年份 → 季 → 类型，和 SubHD 一个标准
-      const haystack = thunderHaystack(item);
-      const score = titleScore(item, meta.name, wanted.year, {
-        titles: wanted.aliases,
-        type,
-        season,
-        episode,
-        // 迅雷的条目名就是文件名：「Friends.Lovers.1999」这种以片名开头、后面接别的
-        // 英文词的，是另一部片子（《老友记》的条目后面接的是 S01E05 / 第一季）。
-        fileName: item.name || '',
-      });
-      if (score <= 0) continue;
-      if (episodeRank({ haystack }, wanted) === null) continue; // 明确是别的集，直接不要
-      picked.set(url, { item, score });
-      matched += 1;
+  let items = [];
+  let usedQuery = '';
+  for (const query of queries.slice(0, 5)) {
+    const found = await searchThunder(query);
+    if (found.length > 0) {
+      items = found;
+      usedQuery = query;
+      break;
     }
-    return matched;
-  };
-
-  const byYear = names.filter((name) => wanted.year && name.endsWith(String(wanted.year)));
-  const plain = names.filter((name) => !byYear.includes(name));
-
-  // 以前是「先查英文名，没结果再查中文译名」一个个串着来 —— 网络一慢，时间就翻倍。
-  // 现在所有候选名（英文名、带年份、中文译名）同时发，谁先回来先收谁，收完再判定。
-  // 一次请求取前三个最有希望的，别把接口打爆。
-  // 迅雷接口对「不带年份」的名字经常返回 0 条（Wednesday → 0，Wednesday 2022 → 10 条），
-  // 所以带年份的写法优先，而且中文译名、原名的各种写法都要发出去。最多 4 个并发。
-  const queries = [...new Set([...byYear, ...plain])].slice(0, 4);
-  let failures = 0;
-  const tasks = queries.map((name) =>
-    searchThunder(name).then(
-      (items) => ({ name, items }),
-      () => {
-        failures += 1;
-        return null;
-      },
-    ),
-  );
-  // 并行等所有写法：谁先回来先收，但**空结果不算数**（空可能是接口对该写法返回空，
-  // 别的写法有）；收够了（>= 上限的一半）就提前结束。
-  const pending = [...tasks];
-  let found = 0;
-  while (pending.length > 0) {
-    const done = await Promise.race(pending);
-    pending.splice(pending.indexOf(done), 1);
-    if (!done) continue;
-    const before = picked.size;
-    collect(done.items);
-    found += picked.size - before;
-    if (found >= Math.ceil(config.thunder.maxResults / 2)) break;
   }
-  await Promise.allSettled(tasks);
-  // 全部失败（网络）才往上报
-  if (failures === queries.length && queries.length > 0) {
-    throw new Error('迅雷所有搜索都失败了');
+  if (items.length === 0) return [];
+
+  // ── 2) 站点在 simple_name 里给了它自己认的中文名（「简体[SRT]奥德赛」）。拿这截中文名再搜
+  //    一遍：Cinemeta 给的是英文名，跟站点的片库对不上时（《奥德赛》《延禧攻略》），这一搜能
+  //    把漏掉的全捞回来。这是参考项目里最关键的一步。
+  const resolvedTitle = dominantSimpleTitle(items);
+  if (resolvedTitle && resolvedTitle !== usedQuery && resolvedTitle !== meta.name) {
+    const refinedQuery = [resolvedTitle, marker || (year ? String(year) : '')].filter(Boolean).join(' ');
+    try {
+      const refined = await searchThunder(refinedQuery);
+      items = mergeByUrl(items, refined);
+    } catch {
+      // 这一搜失败不影响主结果
+    }
   }
 
-  // 排序：本集精确命中 → 没写集号（整部/整剧）→ 整季包；同档按身份分
-  const rows = [...picked.values()].sort(
-    (a, b) =>
-      episodeRank({ haystack: thunderHaystack(a.item) }, wanted) -
-        episodeRank({ haystack: thunderHaystack(b.item) }, wanted) || b.score - a.score,
-  );
+  // ── 3) 轻度防御（不是「严格过滤」）：站点已经把搜索词解析成一部片子了，正常情况下整份结果
+  //    都是那一部。这里只请出去三类东西：别的集、别的季、别的片子（片名完全对不上）。
+  //    **全被请出去就退回原列表** —— 有总比空手强（这是参考项目 selectItems 的原则）。
+  const kept = [];
+  for (const item of items) {
+    if (isTruncatedName(item.name)) continue;
+    if (looksNotFilm(`${item.name || ''} ${item.simple_name || ''}`)) continue;
 
-  const entries = rows.slice(0, config.thunder.maxResults).map(({ item }) => thunderEntry(item, wanted));
+    const haystack = thunderHaystack(item);
+    const info = episodeInfo(`${item.name || ''} ${item.simple_name || ''}`);
+
+    // 季/集：站点给了集号就对一下，没给（整季包、整部剧）就留着
+    if (episode && info.episode !== null && Number(info.episode) !== Number(episode)) continue;
+    if (season && info.season !== null && Number(info.season) !== Number(season)) continue;
+    // 剧集里「权力的游戏8.ass」这种中文名+数字 = 第 8 集
+    if (type === 'series' && episode) {
+      const trailing = cjkTrailingNumber(String(item.name || '').replace(/\.[a-z0-9]{2,4}$/i, ''));
+      if (trailing && info.episode === null && trailing.number !== Number(episode)) continue;
+    }
+    // 片名：只要「和这部片沾边」就留（最长公共片段 / 整串）。完全无关的才请出去。
+    if (checkIdentity({ haystack, fileName: item.name }, want).ok === false) {
+      // 站点自己标的中文名对得上也算（simple_name 里那截片名就是站点给的归属）
+      if (!matchesResolvedTitle(item, meta.name, aliases)) continue;
+    }
+    kept.push(item);
+  }
+
+  const selected = kept.length > 0 ? kept : items.filter((item) => !isTruncatedName(item.name));
+  logSource('thunder', `${id} 搜索「${usedQuery}」拿到 ${items.length} 条，留下 ${selected.length} 条`);
+
+  const entries = dedupeByUrl(selected).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, { ...want, aliases }));
   return entries.map((entry) => thunderTrack(entry, { baseUrl, season, episode }));
+}
+
+/** 站点在 simple_name 里给的片名里出现最多的那个（参考项目的 dominantTitle） */
+function dominantSimpleTitle(items) {
+  const counts = new Map();
+  for (const item of items) {
+    const work = parseSimpleName(item.simple_name).work;
+    if (!work) continue;
+    counts.set(work, (counts.get(work) || 0) + 1);
+  }
+  let best = '';
+  let bestCount = 0;
+  for (const [title, count] of counts) {
+    if (count > bestCount || (count === bestCount && title.length > best.length)) {
+      best = title;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+const mergeByUrl = (first, second) => {
+  const seen = new Set(first.map((item) => item.url || item.gcid));
+  return [...first, ...second.filter((item) => !seen.has(item.url || item.gcid))];
+};
+
+const dedupeByUrl = (items) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = item.url || item.gcid;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+/** 条目自己（文件名或站点给的片名）是否就是这部片 */
+function matchesResolvedTitle(item, title, aliases) {
+  const text = `${item.name || ''} ${item.simple_name || ''}`;
+  const candidates = [title, ...(aliases || [])].filter(Boolean);
+  return candidates.some((name) => {
+    const needle = normalize(name);
+    return needle && normalize(text).includes(needle);
+  });
 }
