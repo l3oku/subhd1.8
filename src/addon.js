@@ -668,11 +668,14 @@ const readSnapshot = (source, id) => snapshotCache.get(snapshotKey(source, id)) 
  */
 let lastRequestAt = 0;
 
-export async function subtitlesHandler({ type, id }, baseUrl, source = null) {
+export async function subtitlesHandler({ type, id, extra = {} }, baseUrl, source = null) {
   if (!/^tt\d+/.test(String(id || ''))) return { subtitles: [] };
 
   const enabled = subtitleSources();
   const want = (candidate) => !source || source === candidate;
+  // 播放器传过来的文件名（Stremio 的 extra 里带 filename）。用它去搜比 Cinemeta 的片名准得多
+  // —— 里面有年份和季集号，去掉 1080p / BluRay / -GROUP 之后就是字幕站的命名习惯（见 filename.js）。
+  const filename = String(extra.filename || extra.videoFilename || '').trim() || '';
   // 冷启动（函数刚起来，DNS 和连接池都是空的）比起热起来慢很多：第一次请求给更宽的预算，
   // 之后再用默认值。不然第一个用户总是看到「某个来源没出来」。
   const warmNow = Date.now();
@@ -728,13 +731,13 @@ export async function subtitlesHandler({ type, id }, baseUrl, source = null) {
   // 等到了就补进这次响应（客户端一次只要等这么久，不会在某一个站上干耗）。
   const jobs = [];
   if (enabled.includes('subhd') && want('subhd')) {
-    jobs.push(job('subhd', () => sourceLoaders.subhd({ type, id, baseUrl }), config.maxSubtitleResults));
+    jobs.push(job('subhd', () => sourceLoaders.subhd({ type, id, baseUrl, filename }), config.maxSubtitleResults));
   }
   if (enabled.includes('thunder') && want('thunder') && isThunderEnabled()) {
-    jobs.push(job('thunder', () => sourceLoaders.thunder({ type, id, baseUrl }), config.thunder.maxResults));
+    jobs.push(job('thunder', () => sourceLoaders.thunder({ type, id, baseUrl, filename }), config.thunder.maxResults));
   }
   if (enabled.includes('assrt') && want('assrt') && isAssrtEnabled()) {
-    jobs.push(job('assrt', () => sourceLoaders.assrt({ type, id, baseUrl }), config.assrt.maxResults));
+    jobs.push(job('assrt', () => sourceLoaders.assrt({ type, id, baseUrl, filename }), config.assrt.maxResults));
   }
   if (jobs.length === 0) return { subtitles: [] };
 
