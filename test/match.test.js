@@ -171,3 +171,32 @@ test('中文片名搜不到时可以用英文名回退，但只在译名表收�
   const campus = await thunderSearchFallback('校园');
   assert.equal(campus.length, 0);
 });
+
+// —— 「迅雷模糊搜索」的真实案例 ——
+test('模糊搜索里只有真正对得上的那条要留下', () => {
+  // 搜「黑暗召唤师在地下恋爱中」返回 18 条：17 条是《恋爱中的女人》《召唤师技能推荐》之类的垃圾
+  const want = { titles: ['黑暗召唤师在地下恋爱中'], aliases: [], year: null, type: 'series', season: 1, episode: 3 };
+  const keep = '黑暗召唤师在地下恋爱中第3集.ass';
+  const drop = [
+    '恋爱中的女人.ass',
+    '5出装和召唤师技能推荐.ass',
+    '恋爱中的死神 2008.srt',
+    '离婚律师恋爱中.srt',
+    '恋爱中的莎士比亚.srt',
+  ];
+  assert.equal(checkIdentity({ haystack: keep, fileName: keep }, want).ok, true);
+  for (const name of drop) {
+    assert.equal(checkIdentity({ haystack: name, fileName: name }, want).ok, false, name);
+  }
+});
+
+test('短片名只能整串出现，并且靠年份区分同名续集', () => {
+  const campus = { titles: ['校园'], aliases: [], year: null, type: 'series' };
+  assert.equal(checkIdentity({ haystack: '校园接送恋曲 第1集.srt', fileName: '校园接送恋曲 第1集.srt' }, campus).ok, true);
+  assert.equal(checkIdentity({ haystack: '小小的我.srt', fileName: '小小的我.srt' }, campus).ok, false);
+
+  // 沙丘 2021 vs 沙丘奇兵 1990：名字开头一样，靠年份分开
+  const dune = { titles: ['沙丘'], aliases: ['dune'], year: 2021, type: 'movie' };
+  assert.equal(checkIdentity({ haystack: '沙丘奇兵 Dune Warriors (1990).srt', fileName: '沙丘奇兵 Dune Warriors (1990).srt' }, dune).ok, false);
+  assert.equal(checkIdentity({ haystack: '沙丘.Dune.2021.srt', fileName: '沙丘.Dune.2021.srt' }, dune).ok, true);
+});
