@@ -666,12 +666,19 @@ const readSnapshot = (source, id) => snapshotCache.get(snapshotKey(source, id)) 
  * /subtitles/<type>/<id>.json —— 三个来源合在一个列表里。
  * `source` 参数只在调试时用（只取某一个站），客户端永远走默认的「全部」。
  */
+let lastRequestAt = 0;
+
 export async function subtitlesHandler({ type, id }, baseUrl, source = null) {
   if (!/^tt\d+/.test(String(id || ''))) return { subtitles: [] };
 
   const enabled = subtitleSources();
   const want = (candidate) => !source || source === candidate;
-  const deadlineMs = config.sourceDeadlineMs;
+  // 冷启动（函数刚起来，DNS 和连接池都是空的）比起热起来慢很多：第一次请求给更宽的预算，
+  // 之后再用默认值。不然第一个用户总是看到「某个来源没出来」。
+  const warmNow = Date.now();
+  const cold = warmNow - lastRequestAt > 60_000;
+  lastRequestAt = warmNow;
+  const deadlineMs = cold ? config.sourceDeadlineColdMs : config.sourceDeadlineMs;
 
   // 每个来源一个任务：先看快照，没有再去站点拿；哪个站超时都不拖累别的。
   // 连不上的来源会被冷落一段时间（见 health.js），不再每次都白等满超时。
