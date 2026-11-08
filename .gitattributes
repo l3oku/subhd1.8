@@ -1,0 +1,3 @@
+# Deploy targets are Linux (Vercel / Docker), so keep every checkout LF.
+* text=auto eol=lf
+bin/7zzs binary
