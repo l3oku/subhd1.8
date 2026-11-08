@@ -1,0 +1,10 @@
+# 镜像里只需要 package.json + src/（见 Dockerfile），但 docker build 会先把整个目录打包
+# 发给 daemon：把仓库历史、测试、抓下来的样本包排除掉，构建快很多。
+.git
+.vercel
+node_modules
+test/
+*.log
+.env
+.env.*
+*.raw
