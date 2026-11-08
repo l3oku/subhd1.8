@@ -155,3 +155,19 @@ test('英文名前面是中文译名时照常匹配（星期三.Wednesday）', (
   assert.equal(checkIdentity({ haystack: head, headOnly: true, head }, want).ok, true);
   assert.equal(checkIdentity({ haystack: 'MyFamilyPies.23.10.10.Megan.Vs.Wednesday' }, want).ok, false);
 });
+
+test('回退搜到的结果必须对得上用户输入（不能拿 Cinemeta 猜的片糊弄）', async () => {
+  const { englishFor } = await import('../src/aliases.js');
+  // 译名表里有的：奥德赛 → the odyssey，可以换名搜
+  assert.deepEqual(englishFor('奥德赛'), ['the odyssey']);
+  // 译名表里没有的：不该凭空造出一个英文名
+  assert.deepEqual(englishFor('校园'), []);
+  assert.deepEqual(englishFor('校园接送恋曲'), []);
+});
+
+test('中文片名搜不到时可以用英文名回退，但只在译名表收录时', async () => {
+  const { thunderSearchFallback } = await import('../src/thunder.js');
+  // 「校园」译名表没收录、Cinemeta 又会把它认成《小小的我》—— 以前会直接返回《小小的我》的字幕
+  const campus = await thunderSearchFallback('校园');
+  assert.equal(campus.length, 0);
+});
