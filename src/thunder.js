@@ -15,7 +15,7 @@ import { parseVideoId } from './parse.js';
 import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import { checkIdentity, cleanTitle, episodeInfo, episodeRank, firstYear, isWholeShow, normalize, seasonInfo } from './match.js';
-import { aliasesFor } from './aliases.js';
+import { aliasesFor, englishFor } from './aliases.js';
 
 export const isThunderEnabled = () => true;
 
@@ -151,6 +151,51 @@ export async function searchThunder(name) {
   return items;
 }
 
+/**
+ * 「这个词搜不到」时的备用搜法：迅雷的字幕库按条目名建索引，中文片名常常搜不到
+ * （实搜「奥德赛」0 条、「The Odyssey」57 条，而且那 57 条的文件名全是「奥德赛.srt」）。
+ * 所以中文没结果时，用 Cinemeta 拿到英文原名 / 官方名再搜一遍；反过来也一样。
+ */
+export async function thunderSearchFallback(keyword) {
+  const raw = String(keyword || '').trim();
+  if (!raw) return [];
+
+  // 迅雷的索引是「条目名」：中文片名常常搜不到（「奥德赛」0 条），而它的英文名一搜就是
+  // 一大堆中文文件（「The Odyssey」57 条，文件名全是「奥德赛.srt」）。所以中文没结果时，
+  // 按译名表反查英文原名再搜一次。
+  const candidates = new Set();
+  for (const english of englishFor(raw)) {
+    // 英文首字母大写：迅雷索引区分大小写（「the odyssey」搜不到，「The Odyssey」可以）
+    candidates.add(english.replace(/\b\w/g, (c) => c.toUpperCase()));
+  }
+  // 译名表没收录时，问一下 Cinemeta（中文能查到就拿它的英文名）
+  if (candidates.size === 0) {
+    try {
+      const { searchMeta } = await import('./meta.js');
+      const hit = await searchMeta('movie', raw);
+      for (const name of [hit?.name, hit?.originalName].filter(Boolean)) candidates.add(name);
+    } catch {
+      // 查不到就放弃
+    }
+  }
+
+  candidates.delete(raw);
+  const tries = [...candidates].filter(Boolean).slice(0, 2);
+  if (tries.length === 0) return [];
+
+  const results = await Promise.allSettled(tries.map((term) => searchThunder(term)));
+  const merged = new Map();
+  for (const item of results) {
+    if (item.status !== 'fulfilled') continue;
+    for (const row of item.value) {
+      const key = row.url || row.gcid;
+      if (!merged.has(key)) merged.set(key, row);
+    }
+  }
+  logSource('thunder', `「${raw}」没结果，改用 ${JSON.stringify(tries)} 搜到 ${merged.size} 条`);
+  return [...merged.values()];
+}
+
 // ------------------------------------------------ 拆名字 ------------------------------------------------
 
 const SIMPLE_NAME_RE = /^(\S*?)\s*\[([A-Za-z0-9]+)\]\s*(.*?)\s*(?:\((\d{4})\))?$/;
@@ -187,10 +232,15 @@ export const EXT_FORMAT = { srt: 'SRT', ass: 'ASS', ssa: 'ASS', vtt: 'VTT', sup:
 // 迅雷每条结果都带一个 simple_name（「简体[SRT]The Greatest」），它里面的片名是**搜索
 // 时用的关键词**、不是这条字幕自己的名字 —— 拼进判定文本的话，搜什么都会「对上」，
 // Sia 的 MV、苹果广告全都能过。所以只留语言/格式标记，片名以 fileName 为准。
+// 判定用的文本：文件名 + simple_name 里的片名。
+// 迅雷每条结果都带 simple_name（「简体[SRT]奥德赛」），那截片名是**站点自己给这条字幕定的片名**，
+// 比文件名可靠 —— 57 条「The Odyssey」里有 35 条只有中文片名（奥德赛.srt），
+// 以前只看文件名，这些中文条目就全被判成「片名对不上」丢掉了。
+// 语言/格式标记（简体、SRT）不进判定文本，避免把片名顶到后面去。
 export function thunderHaystack(item) {
-  // 只用文件名：simple_name 里的「简体[SRT]」这些标记会把片名顶到后面去，
-  // 让「片名必须在名称段开头」那条规则失效
-  return String(item.name || '');
+  const parsed = parseSimpleName(item.simple_name);
+  const work = parsed.work && parsed.work !== item.name ? parsed.work : '';
+  return [String(item.name || ''), work].filter(Boolean).join(' ');
 }
 
 /** 条目「自己的作品名」：simple_name 里那截片名（只用于显示，不参与判定） */
