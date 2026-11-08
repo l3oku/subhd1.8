@@ -87,7 +87,7 @@ export const config = {
   sources: enabledSources,
   // 每个来源最多等多久（毫秒）。客户端自己有超时，一个站连不上不能拖着整个列表；
   // 到点就用已经拿到的结果，晚到的写进缓存。0 = 不限时。
-  sourceDeadlineMs: int(process.env.SOURCE_DEADLINE_MS, 6000),
+  sourceDeadlineMs: int(process.env.SOURCE_DEADLINE_MS, 9000),
   // 冷启动时（函数刚起来 / 空闲超过一分钟）给更宽的预算：DNS 和连接池都是空的，第一次总要慢些
   sourceDeadlineColdMs: int(process.env.SOURCE_DEADLINE_COLD_MS, 8000),
   // 第一个来源回来后，再给其它来源多久「补进来」（不补也无所谓，结果会进缓存）
