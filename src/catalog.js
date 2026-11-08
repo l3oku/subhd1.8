@@ -65,69 +65,88 @@ function englishTitleFrom(value) {
 
 const usableName = (title) => /[\p{Script=Han}]/u.test(title) ? title.length >= 2 && title.length <= 60 : title.length >= 3 && title.split(/\s+/).length <= 8;
 
-// 「用户输入的关键词 → 该拿去迅雷搜的几个词」。
+// 「用户输入的关键词 → 该拿去迅雷搜的词」。
 //
-// 迅雷的索引很怪：搜 `The Odyssey` 能出 57 条（而且文件全是中文的「奥德赛.srt」），
-// 但搜 `Odyssey`、搜「奥德赛」都是 0 条 —— 它只认「完整的英文原名」。
-// 所以不能拿用户输入的原词硬搜，要先靠 Cinemeta 把片子认准：
-//   用户输入 "Odyssey" → Cinemeta 找不到准确条目 → 试 "The Odyssey" → 命中 tt33764258，
-//   拿到片名 "The Odyssey" → 用这个完整名字去迅雷搜，57 条就都出来了。
-async function thunderSearchTerms(keyword) {
+// 关键事实（实测）：
+//   - Cinemeta 的 **series** 检索对中文很准：绝命毒师→Breaking Bad、老友记→Friends、
+//     权力的游戏→Game of Thrones；而 **movie** 检索对中文基本是乱的（绝命毒师→《续命之徒》）。
+//   - 迅雷只认完整英文名：搜 "The Odyssey" 57 条（文件是中文的「奥德赛.srt」），
+//     搜英文残缺名 / 某些中文名是 0 条。
+// 所以顺序是：**先用用户输入（中文也行）问 Cinemeta 拿标准片名 → 再用标准片名去迅雷搜**，
+// 而不是拿迅雷的中文结果去反查 Cinemeta（那样会被电影类型的乱结果带偏）。
+async function thunderSearchTerms(keyword, kind) {
   const raw = String(keyword || '').trim();
-  const candidates = new Set();
-  const add = (value) => {
-    const text = String(value || '').trim().replace(/\s{2,}/g, ' ');
-    if (text) candidates.add(text);
-  };
-
-  add(raw);
-
-  // 用 Cinemeta 认准这部片，拿到它的「标准片名」。
-  // 注意不能「第一个查询有结果就用」：搜 "Odyssey" 会命中另一部同名片（tt31227740, 2025），
-  // 而用户想要的是 "The Odyssey"（2026）。所以每个写法都查，最后挑片名和输入最接近的。
-  const hits = [];
-  for (const term of [...candidates]) {
+  const terms = new Set([raw]); // 原词优先
+  // 先按目录类型查，查不到再查另一种
+  const order = kind === 'series' ? ['series', 'movie'] : ['movie', 'series'];
+  for (const type of order) {
     try {
-      const hit = await searchMeta('movie', term);
-      if (hit && /^tt\d+$/.test(String(hit.id || ''))) hits.push({ hit, term });
+      const hit = await searchMeta(type, raw);
+      if (!hit?.name) continue;
+      const clean = String(hit.name).replace(/\s*\(\d{4}\)\s*$/, '').trim();
+      if (clean) terms.add(clean);
+      if (hit.originalName) terms.add(String(hit.originalName).trim());
+      if (clean || hit.originalName) break;
     } catch {
-      // 忽略，继续试下一个写法
+      // 继续试
     }
   }
-  // 完全同名 > 输入是片名的一部分（Odyssey ⊂ The Odyssey）
-  // 降序排：完全同名 > 输入是片名的一部分（Odyssey ⊂ The Odyssey）> 只沾一点
-  // 输入本身是完整片名（"The Odyssey"）时，同名的那个永远排第一
-  const score = ({ hit, term }) => {
-    const name = String(hit.name || '').toLowerCase().trim();
-    const input = term.toLowerCase().trim();
-    if (name === input) return 3;
-    // 带冠词的写法命中（输入 "Odyssey"，结果 "The Odyssey"）也算高匹配
-    if (name.replace(/^(the|a|an)\s+/, '') === input.replace(/^(the|a|an)\s+/, '')) return 3;
-    if (name.includes(input) || input.includes(name)) return 2;
-    return 1;
-  };
-  hits.sort((a, b) => score(b) - score(a));
-  let meta = hits[0]?.hit || null;
-  if (meta) meta = await addonMeta('movie', meta.id).catch(() => null) || meta;
+  // 用户原词一定保留在最前面：迅雷的中文条目（「老友记」「绝命毒师」）只有中文名能搜到，
+  // 换成英文名反而一条都没有。
+  return [...terms].filter(Boolean).slice(0, 3);
+}
 
-  const final = new Set();
-  const add2 = (v) => { const t = String(v || '').trim().replace(/\s{2,}/g, ' '); if (t) final.add(t); };
-  if (meta) {
-    const names = [meta.name, meta.originalName].filter(Boolean);
-    for (const name of names) {
-      const clean = String(name).replace(/\s*\(\d{4}\)\s*$/, '').trim();
-      add2(clean); // 完整英文名（迅雷真正认的写法）
-      for (const alias of aliasesFor(clean)) add2(alias); // 中文译名也带上
+// 「迅雷里搜出来的这些作品名 → 挑出适合当搜索结果的」。
+// 用户输中文时，迅雷给的 simple_name 也是中文（「奥德赛」），拿它查 Cinemeta 会串到别的片，
+// 所以这里优先用「用户原词已经在 Cinemeta 认出来的那部」，其次才用迅雷自己的名字去认。
+async function pickBestWorks(works, keyword, kind) {
+  const years = new Set(works.map((w) => w.year).filter(Boolean).map(String));
+  const order = kind === 'series' ? ['series', 'movie'] : ['movie', 'series'];
+  const wantName = (() => {
+    const w = String(keyword || '').toLowerCase().trim();
+    return w;
+  })();
+
+  const hits = [];
+  for (const work of works) {
+    if (!work.title) continue;
+    for (const type of order) {
+      try {
+        const hit = await searchMeta(type, work.title, { year: work.year });
+        if (hit && /^tt\d+$/.test(String(hit.id || ''))) hits.push({ hit, work, type });
+      } catch {
+        // 忽略
+      }
     }
-    const year = Number(String(meta.releaseInfo || '').match(/(19|20)\d{2}/)?.[0]) || null;
-    if (year && meta.name) add2(`${String(meta.name).replace(/\s*\(\d{4}\)\s*$/, '')} ${year}`);
   }
 
-  // 用户的原词也留着（万一是中文名）
-  add2(raw);
-  // 没有 meta 时至少保证有原词和带冠词的写法
-  if (final.size === 0) for (const c of candidates) add2(c);
-  return [...final].slice(0, 4);
+  const scored = hits.map((entry) => {
+    const name = String(entry.hit.name || '').toLowerCase();
+    const title = String(entry.work.title || '').toLowerCase();
+    let score = 0;
+    if (name === title || name.replace(/^(the|a|an)\s+/, '') === title.replace(/^(the|a|an)\s+/, '')) score += 3;
+    else if (name.includes(title) || title.includes(name)) score += 1;
+    const metaYear = String(entry.hit.releaseInfo || '').match(/(19|20)\d{2}/)?.[0];
+    if (metaYear && years.has(metaYear)) score += 4; // 迅雷里有这个年份的条目 → 就是这部
+    if (entry.type === kind) score += 2; // 和目录类型一致
+    if (/[\u4e00-\u9fff]/.test(wantName) && entry.type === 'series') score += 1;
+    return { ...entry, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  const seen = new Set();
+  for (const entry of scored) {
+    if (seen.has(entry.hit.id)) continue;
+    seen.add(entry.hit.id);
+    picked.push({
+      title: entry.hit.name,
+      year: Number(String(entry.hit.releaseInfo || '').match(/(19|20)\d{2}/)?.[0]) || null,
+    });
+    if (picked.length >= MAX_LOOKUPS) break;
+  }
+  if (picked.length === 0) return works.filter((w) => w.title).slice(0, MAX_LOOKUPS);
+  return picked;
 }
 
 export async function sourceCatalog({ type, source, kind, keyword = '', skip = 0 }) {
@@ -145,17 +164,15 @@ export async function sourceCatalog({ type, source, kind, keyword = '', skip = 0
     if (source === 'thunder') {
       // 迅雷的字幕库基本只认中文名：搜「沙丘」58 条，搜「Dune」/「Odyssey」都是 0 条。
       // 用户在目录里输入的可能是英文片名，所以先用 Cinemeta 查一下，拿它的中文译名一起搜。
-      const terms = await thunderSearchTerms(keyword);
+      const terms = await thunderSearchTerms(keyword, type);
       const batches = await Promise.allSettled(terms.map((term) => searchThunder(term)));
       const items = batches.flatMap((batch) => (batch.status === 'fulfilled' ? batch.value : []));
       const works = [];
       const seenWorks = new Set();
-      // 迅雷的 simple_name 是中文（「简体[SRT]奥德赛(2026)」），拿它去 Cinemeta 会查错片
-      // （「奥德赛」只命中 2016 那部）。所以先用**文件名里的英文名**（The.Odyssey.2026…）反查，
-      // 查不到再退回中文名。
+      // 迅雷的 simple_name 是中文（「简体[SRT]奥德赛(2026)」），拿它去 Cinemeta 会查错片，
+      // 所以优先用文件名里的英文名（The.Odyssey.2026…）反查，查不到再退回中文名。
       for (const item of items) {
         const parsed = parseSimpleName(item.simple_name);
-        // 年份：simple_name 里带的（「简体[SRT]奥德赛(2026)」）最可靠，没有再从文件名里找
         const year =
           parsed.year || Number(String(item.name || '').match(/(?<!\d)(19|20)\d{2}(?!\d)/)?.[0]) || null;
         const title = parsed.work || englishTitleFrom(item.name);
@@ -165,11 +182,13 @@ export async function sourceCatalog({ type, source, kind, keyword = '', skip = 0
         works.push({ title, year });
         if (works.length >= MAX_LOOKUPS) break;
       }
-      // 迅雷是按热度排的，同名不同年的片子会混在一起（奥德赛 2026 / 2016 / 1961）。
-      // 用户搜的就是他想要的那部，所以让「年份最新 + 条目最多」的排前面。
+      // 迅雷是按热度排的，同名不同年的片子会混在一起（奥德赛 2026 / 2016 / 1961）
       works.sort((a, b) => (b.year || 0) - (a.year || 0));
-      const previews = await Promise.all(works.map((work) => previewFor(type, work.title, work.year)));
+      // 把迅雷里出现的「作品名+年份」交给打分用（判断 Cinemeta 的候选是不是真的在迅雷里）
+      const ranked = await pickBestWorks(works, keyword, type);
+      const previews = await Promise.all(ranked.map((work) => previewFor(type, work.title, work.year)));
       for (const preview of previews) push(preview);
+      if (metas.length === 0) logSource('catalog', `thunder/${type} 没认出「${keyword}」（迅雷 ${items.length} 条，作品 ${works.length} 个）`);
       return metas;
     }
 
