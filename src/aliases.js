@@ -60,6 +60,7 @@ export const TITLE_ALIASES = {
   sherlock: ['神探夏洛克'],
 
   // 经典电影
+  'the odyssey': ['奥德赛', '奥德塞'],
   'the godfather': ['教父'],
   'the lord of the rings': ['指环王', '魔戒'],
   'harry potter': ['哈利波特'],
@@ -106,6 +107,13 @@ export const TITLE_ALIASES = {
 };
 
 // 名字 → 中文译名列表（大小写、标点都不敏感）
+// 片名的「近似问法」：别名表里没收录的片子，也尽量多试一种查法 ——
+// 迅雷 / 射手的中文条目常常只写中文名，而英文名搜不到中文条目。
+const CJK_ALIAS_HINTS = {
+  奥德赛: ['the odyssey'],
+  odyssey: ['奥德赛'],
+};
+
 export function aliasesFor(title) {
   const key = String(title || '')
     .toLowerCase()
@@ -115,6 +123,9 @@ export function aliasesFor(title) {
   if (!key) return [];
 
   const found = new Set(TITLE_ALIASES[key] || []);
+  for (const [needle, extra] of Object.entries(CJK_ALIAS_HINTS)) {
+    if (key.includes(needle)) for (const alias of extra) found.add(alias);
+  }
   // 「Dune: Part Two」去掉副标题后也查一次（「Dune」→ 沙丘）
   const head = key.split(' ')[0];
   if (head && head !== key && TITLE_ALIASES[head]) {
