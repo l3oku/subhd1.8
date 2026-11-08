@@ -1,0 +1,10 @@
+node_modules/
+.vercel/
+.env
+.env.*
+# .env.example 是要进仓库的模板，别被上面的 `.env.*` 一起忽略掉
+!.env.example
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
