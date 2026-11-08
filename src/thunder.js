@@ -28,6 +28,7 @@ import {
   seasonInfo,
 } from './match.js';
 import { aliasesFor, englishFor } from './aliases.js';
+import { searchQueryFromFilename } from './filename.js';
 
 export const isThunderEnabled = () => true;
 
@@ -402,7 +403,7 @@ export function fromBase64url(value) {
   }
 }
 
-export async function thunderSubtitles({ type, id, baseUrl }) {
+export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
   const { imdbId, season, episode } = parseVideoId(id);
   if (!imdbId) return [];
 
@@ -425,21 +426,38 @@ export async function thunderSubtitles({ type, id, baseUrl }) {
     const text = String(value || '').trim();
     if (text.length >= 2 && !queries.includes(text)) queries.push(text);
   };
+  // 最优先：播放器传来的文件名清洗后的结果（The Greatest S01E01 Fools Gold → 去掉画质/组名）。
+  // 这是 EasySub 的做法：文件名里有年份和季集号，和字幕站的命名习惯一致，命中率最高。
+  const fromFilename = searchQueryFromFilename(filename);
+  if (fromFilename) add(fromFilename);
   for (const base of [meta.name, ...aliases]) {
     if (marker) add(`${base} ${marker}`);
     if (year) add(`${base} ${year}`);
     add(base);
   }
 
+  // 先看前几个写法各自返回多少「片名对得上」的结果，挑最多的那个用 —— 不是「有结果就停」。
+  // 实测：搜 `The Greatest` 有 14 条片名正好是 The Greatest；搜 `The Greatest S01E01` 反而
+  // 被「Greatest American Dog」这类挤掉。反过来对某些片子，带季集号才准。所以由数据决定。
   let items = [];
   let usedQuery = '';
-  for (const query of queries.slice(0, 5)) {
-    const found = await searchThunder(query);
-    if (found.length > 0) {
+  let bestHits = 0;
+  for (const query of queries.slice(0, 4)) {
+    let found;
+    try {
+      found = await searchThunder(query);
+    } catch {
+      continue;
+    }
+    if (found.length === 0) continue;
+    const hits = found.filter((item) => matchesResolvedTitle(item, meta.name, aliases)).length;
+    if (hits > bestHits) {
+      bestHits = hits;
       items = found;
       usedQuery = query;
-      break;
     }
+    // 已经拿到足够多「片名对得上」的结果，不用再试
+    if (bestHits >= 8) break;
   }
   if (items.length === 0) return [];
 
@@ -485,9 +503,18 @@ export async function thunderSubtitles({ type, id, baseUrl }) {
   }
 
   const selected = kept.length > 0 ? kept : items.filter((item) => !isTruncatedName(item.name));
-  logSource('thunder', `${id} 搜索「${usedQuery}」拿到 ${items.length} 条，留下 ${selected.length} 条`);
 
-  const entries = dedupeByUrl(selected).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, { ...want, aliases }));
+  // 最后一道闸：留下的条目里必须有「片名整串对上」的。只有那种靠公共片段勉强沾边的，说明站点
+  // 根本没有这部片 —— 宁可不显示，也别端一堆别的片子的字幕上去。
+  //   反例：迅雷里没有《The Greatest》(2026)，只搜 `The Greatest` 会给回 14 条 2024 年的同名片。
+  const strong = selected.filter((item) => isStrongMatch(item, meta.name, aliases, year));
+  if (strong.length === 0) {
+    logSource('thunder', `${id} 没有可信结果（${selected.length} 条都只是勉强沾边），返回空`);
+    return [];
+  }
+  logSource('thunder', `${id} 搜索「${usedQuery}」拿到 ${items.length} 条，留下 ${strong.length} 条`);
+
+  const entries = dedupeByUrl(strong).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, { ...want, aliases }));
   return entries.map((entry) => thunderTrack(entry, { baseUrl, season, episode }));
 }
 
@@ -524,6 +551,38 @@ const dedupeByUrl = (items) => {
     return true;
   });
 };
+
+/**
+ * 「强匹配」：片名整串出现在文件名或站点给的片名里，且年份不冲突。
+ * 这是判断「站点到底有没有这部片」的依据 —— 靠公共片段沾边的不算。
+ */
+function isStrongMatch(item, title, aliases, year) {
+  const text = normalize(`${item.name || ''} ${item.simple_name || ''}`);
+  const candidates = [title, ...(aliases || [])].filter(Boolean);
+  const hit = candidates.some((name) => {
+    const needle = normalize(name);
+    if (needle.length < 2) return false;
+    // 片名必须是「完整的一段」，不能是长句里的一截：
+    //   The Greatest.srt / The Greatest (2026) / The.Greatest.S01E01 → 认
+    //   The_Greatest_Tomb_On_Earth / Sia - The Greatest / 50 of the greatest MOVIE QUOTES → 不认
+    // 做法：在名字里找到片名，看它前后是什么 —— 前后只能是分隔符、季集、年份、语言或中文。
+    const index = text.indexOf(needle);
+    if (index < 0) return false;
+    const before = text.slice(0, index).trim();
+    const after = text.slice(index + needle.length).trim();
+    const okBefore = !before || /^(s\d{1,2}|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2})$/.test(before.split(' ').pop() || '')
+      || /[\u3400-\u4dbf\u4e00-\u9fff]$/.test(before);
+    const okAfter = !after || /^(s\d{1,2}|season|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2}|\d{3,4}p|chs|cht|eng|zh|sc|tc|srt|ass|ssa|vtt)/.test(after)
+      || /^[\u3400-\u4dbf\u4e00-\u9fff]/.test(after);
+    return okBefore && okAfter;
+  });
+  if (!hit) return false;
+  if (year) {
+    const years = new Set(String(`${item.name || ''} ${item.simple_name || ''}`).match(/(?<!\d)(19|20)\d{2}(?!\d)/g) || []);
+    if (years.size > 0 && ![...years].some((value) => Math.abs(Number(value) - Number(year)) <= 1)) return false;
+  }
+  return true;
+}
 
 /** 条目自己（文件名或站点给的片名）是否就是这部片 */
 function matchesResolvedTitle(item, title, aliases) {
