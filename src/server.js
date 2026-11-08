@@ -395,10 +395,13 @@ async function assrtTrack({ id, ext, season, episode, lang }) {
 
 async function sourceSearch(source, keyword) {
   if (source === 'thunder') {
-    const { searchThunder } = await import('./thunder.js');
+    const { searchThunder, thunderSearchFallback } = await import('./thunder.js');
     let items;
     try {
       items = await searchThunder(keyword);
+      // 迅雷的索引挂的是「条目名」：中文片名经常搜不到，但它的英文名一搜就是一堆中文文件
+      // （搜「奥德赛」0 条，搜「The Odyssey」57 条全叫「奥德赛.srt」）。中文没结果就换英文再搜。
+      if (items.length === 0) items = await thunderSearchFallback(keyword);
     } catch (error) {
       // 迅雷接口在部分机房/网络连不上：给一句人话，别把「This operation was aborted」丢给用户
       throw new AppError(
