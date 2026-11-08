@@ -88,6 +88,8 @@ export const config = {
   // 每个来源最多等多久（毫秒）。客户端自己有超时，一个站连不上不能拖着整个列表；
   // 到点就用已经拿到的结果，晚到的写进缓存。0 = 不限时。
   sourceDeadlineMs: int(process.env.SOURCE_DEADLINE_MS, 3500),
+  // 冷启动时（函数刚起来 / 空闲超过一分钟）给更宽的预算：DNS 和连接池都是空的，第一次总要慢些
+  sourceDeadlineColdMs: int(process.env.SOURCE_DEADLINE_COLD_MS, 8000),
   // 第一个来源回来后，再给其它来源多久「补进来」（不补也无所谓，结果会进缓存）
   sourceLateGraceMs: int(process.env.SOURCE_LATE_GRACE_MS, 1000),
   // 某个来源连续失败这么多次就先跳过它一段时间（毫秒），别每次请求都白等一遍
@@ -103,6 +105,10 @@ export const config = {
     // 连不上的几秒内就放弃，换/退回别的来源
     // 单次超时别太短：机房跨境连迅雷本来就要 1~3 秒，4 秒会误杀；整体仍受 SOURCE_DEADLINE_MS 兜底
     timeoutMs: int(process.env.THUNDER_TIMEOUT_MS, 2500),
+    // 可选：Cloudflare Worker 出口代理。Vercel 机房连迅雷常被掐断，配上之后迅雷这一路
+    // 走 CF（实测 CF 香港连迅雷 5/5 成功、0.4~1 秒）。不配就直连，行为不变。
+    proxyUrl: (process.env.THUNDER_PROXY_URL || '').trim(),
+    proxySecret: (process.env.THUNDER_PROXY_SECRET || '').trim(),
     // 一次最多往播放器列表里放多少条
     maxResults: int(process.env.THUNDER_MAX_RESULTS, 30),
     // 片名要和字幕名对得上才算：至少命中标题里的几个词（英文按词算，中文按整串算）
