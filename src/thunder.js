@@ -381,7 +381,9 @@ export async function thunderSubtitles({ type, id, baseUrl }) {
   // 以前是「先查英文名，没结果再查中文译名」一个个串着来 —— 网络一慢，时间就翻倍。
   // 现在所有候选名（英文名、带年份、中文译名）同时发，谁先回来先收谁，收完再判定。
   // 一次请求取前三个最有希望的，别把接口打爆。
-  const queries = [...byYear, ...plain].slice(0, 3);
+  // 迅雷接口对「不带年份」的名字经常返回 0 条（Wednesday → 0，Wednesday 2022 → 10 条），
+  // 所以带年份的写法优先，而且中文译名、原名的各种写法都要发出去。最多 4 个并发。
+  const queries = [...new Set([...byYear, ...plain])].slice(0, 4);
   let failures = 0;
   const tasks = queries.map((name) =>
     searchThunder(name).then(
@@ -392,13 +394,18 @@ export async function thunderSubtitles({ type, id, baseUrl }) {
       },
     ),
   );
-  // 谁先回来先收谁；一旦收到了「能用的结果」就不再等其它词（它们慢没意义）
+  // 并行等所有写法：谁先回来先收，但**空结果不算数**（空可能是接口对该写法返回空，
+  // 别的写法有）；收够了（>= 上限的一半）就提前结束。
   const pending = [...tasks];
+  let found = 0;
   while (pending.length > 0) {
     const done = await Promise.race(pending);
     pending.splice(pending.indexOf(done), 1);
     if (!done) continue;
-    if (collect(done.items) > 0) break;
+    const before = picked.size;
+    collect(done.items);
+    found += picked.size - before;
+    if (found >= Math.ceil(config.thunder.maxResults / 2)) break;
   }
   await Promise.allSettled(tasks);
   // 全部失败（网络）才往上报
