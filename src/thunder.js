@@ -162,38 +162,56 @@ export async function thunderSearchFallback(keyword) {
 
   // 迅雷的索引是「条目名」：中文片名常常搜不到（「奥德赛」0 条），而它的英文名一搜就是
   // 一大堆中文文件（「The Odyssey」57 条，文件名全是「奥德赛.srt」）。所以中文没结果时，
-  // 按译名表反查英文原名再搜一次。
-  const candidates = new Set();
+  // 按译名表反查英文原名再搜。
+  //
+  // 关键：换名字之后**必须校验结果还是不是用户要的那部片**。以前这里不做校验，
+  // Cinemeta 把「校园」认成《小小的我》（Big World），就原样把《小小的我》的字幕端上去了。
+  const attempts = [];
   for (const english of englishFor(raw)) {
-    // 英文首字母大写：迅雷索引区分大小写（「the odyssey」搜不到，「The Odyssey」可以）
-    candidates.add(english.replace(/\b\w/g, (c) => c.toUpperCase()));
+    attempts.push({ term: english.replace(/\b\w/g, (c) => c.toUpperCase()), source: 'alias' });
   }
-  // 译名表没收录时，问一下 Cinemeta（中文能查到就拿它的英文名）
-  if (candidates.size === 0) {
+  if (attempts.length === 0) {
     try {
       const { searchMeta } = await import('./meta.js');
       const hit = await searchMeta('movie', raw);
-      for (const name of [hit?.name, hit?.originalName].filter(Boolean)) candidates.add(name);
+      // 拿到的英文名必须和原词有明确关系（译名表收录，或者名字本身包含原词），否则不用
+      for (const name of [hit?.name, hit?.originalName].filter(Boolean)) {
+        attempts.push({ term: name, source: 'cinemeta', hit });
+      }
     } catch {
       // 查不到就放弃
     }
   }
-
-  candidates.delete(raw);
-  const tries = [...candidates].filter(Boolean).slice(0, 2);
+  const tries = attempts.filter((item) => item.term && item.term !== raw).slice(0, 2);
   if (tries.length === 0) return [];
 
-  const results = await Promise.allSettled(tries.map((term) => searchThunder(term)));
+  const results = await Promise.allSettled(tries.map((item) => searchThunder(item.term)));
   const merged = new Map();
-  for (const item of results) {
+  for (const [index, item] of results.entries()) {
     if (item.status !== 'fulfilled') continue;
+    const attempt = tries[index];
     for (const row of item.value) {
+      // 用 Cinemeta 猜出来的英文名搜到的东西，必须能「反查回」用户输入的中文名才算数：
+      // 要么译名表里这个英文名确实对应中文输入，要么条目自己的片名里就含用户输入的字。
+      if (attempt.source === 'cinemeta' && !isSamePicture(row, raw, attempt.term)) continue;
       const key = row.url || row.gcid;
       if (!merged.has(key)) merged.set(key, row);
     }
   }
-  logSource('thunder', `「${raw}」没结果，改用 ${JSON.stringify(tries)} 搜到 ${merged.size} 条`);
+  logSource('thunder', `「${raw}」没结果，改用 ${JSON.stringify(tries.map((t) => t.term))} 搜到 ${merged.size} 条（已校验）`);
   return [...merged.values()];
+}
+
+// 换了英文名搜到的条目，是否真的对应用户原来输入的那个词
+function isSamePicture(item, originalKeyword, englishTerm) {
+  const haystack = `${thunderHaystack(item)} ${item.simple_name || ''}`;
+  if (!haystack.trim()) return false;
+  // 条目自己的中文片名里就包含用户输入的字 → 是同一部
+  if (/[\u3400-\u4dbf\u4e00-\u9fff]/.test(originalKeyword) && haystack.includes(originalKeyword)) return true;
+  // 否则必须能通过译名表把英文名对回这个中文词
+  const english = englishTerm.toLowerCase();
+  const back = englishFor(originalKeyword).map((name) => name.toLowerCase());
+  return back.includes(english);
 }
 
 // ------------------------------------------------ 拆名字 ------------------------------------------------
