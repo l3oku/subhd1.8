@@ -10,6 +10,7 @@
 import { config } from './config.js';
 import { TtlCache } from './cache.js';
 import { fetchText, logSource } from './net.js';
+import { isProxyEnabled, proxyFetchText } from './proxy-cf.js';
 import { parseVideoId } from './parse.js';
 import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
@@ -93,6 +94,22 @@ function thunderBases() {
 
 async function queryOne(base, name) {
   const url = `${base}/oracle/subtitle?name=${encodeURIComponent(name)}`;
+  // 配了 Cloudflare 出口代理就走代理：Vercel 的机房连迅雷经常 Connect Timeout，
+  // 而 CF 香港节点实测稳定（见 proxy-cf.js 的说明）。
+  if (isProxyEnabled()) {
+    const viaProxy = await proxyFetchText(url, { timeoutMs: config.thunder.timeoutMs + 3000, accept: 'application/json' });
+    if (!viaProxy.ok) {
+      logSource('thunder', `代理搜索 HTTP ${viaProxy.status}: ${name}`);
+      return [];
+    }
+    try {
+      const body = JSON.parse(viaProxy.text);
+      if (!body || Number(body.code) !== 0 || !Array.isArray(body.data)) return [];
+      return body.data.filter((item) => item && typeof item.url === 'string' && /^https?:\/\//.test(item.url));
+    } catch {
+      return [];
+    }
+  }
   const response = await fetchText(url, {
     accept: 'application/json, text/plain, */*',
     acceptLanguage: 'zh-CN,zh;q=0.9',
