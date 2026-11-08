@@ -21,7 +21,7 @@ import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import { extOfUrl, loadArchive } from './files.js';
 import { checkIdentity, episodeRank, isWholeShow, normalize, seasonInfo } from './match.js';
-import { isProxyEnabled, proxyFetchBinary } from './proxy-cf.js';
+import { isProxyEnabled, proxyFetchBinary, proxyFetchText } from './proxy-cf.js';
 import { aliasesFor } from './aliases.js';
 
 export const isAssrtEnabled = () => true;
@@ -234,7 +234,14 @@ async function webGet(pathname, { referer = '' } = {}) {
   for (const domain of config.assrt.domains) {
     const url = `https://${domain}${pathname}`;
     try {
-      const response = await fetchText(url, { referer, timeoutMs: config.assrt.timeoutMs });
+      // 先直连（热连接很快），失败或超时才走 CF 代理兜底 —— 每个请求都绕一次 Worker 反而更慢
+      let response;
+      try {
+        response = await fetchText(url, { referer, timeoutMs: Math.min(config.assrt.timeoutMs, 3500) });
+      } catch (error) {
+        if (!isProxyEnabled()) throw error;
+        response = await proxyFetchText(url, { timeoutMs: 8000 });
+      }
       if (response.ok) return { ...response, url, domain };
       lastError = new Error(`HTTP ${response.status}: ${url}`);
     } catch (error) {
