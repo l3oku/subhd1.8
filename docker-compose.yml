@@ -1,0 +1,54 @@
+# 一键自建：clone 下来直接 `docker compose up -d --build` 就能跑，默认 7000 端口。
+# 要改端口 / 挂到域名后面，就 `cp .env.example .env` 改那几行（见 .env.example）。
+services:
+  subhd-addon:
+    build: .
+    image: stremio-subhd
+    container_name: stremio-subhd
+    restart: unless-stopped
+    # node 直接当 PID 1，解压时会 fork 7-Zip，交给 tini 收尸
+    init: true
+    # 宿主机和容器同一个端口：改 .env 里的 PORT 就够了（宿主机 7000 被占用时改它）
+    ports:
+      - "${PORT:-7000}:${PORT:-7000}"
+    # README 里那条客户端隧道（ssh -R）是绑在**宿主机**上的，而容器里的 127.0.0.1 是它自己。
+    # 这行让容器里的 host.docker.internal 指向宿主机，于是出口可以写成
+    #   SUBHD_PROXIES=socks5://host.docker.internal:1080
+    # （隧道那头要绑到 0.0.0.0：`ssh -R 0.0.0.0:1080:127.0.0.1:7890 user@这台机器`，
+    #  并且服务端 sshd 配了 GatewayPorts clientspecified 或 yes）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 嫌上面那套麻烦，就让容器直接用宿主机的网络命名空间：那时端口映射要删掉，
+    # 隧道也照默认绑 127.0.0.1 就行，出口写 socks5://127.0.0.1:1080。
+    # network_mode: host
+    environment:
+      # 对外地址：反代 / 隧道后面必填；直连 <IP>:<PORT> 时留空，插件按 Host 自己推断
+      ADDON_BASE_URL: "${ADDON_BASE_URL:-}"
+      PORT: "${PORT:-7000}"
+      SUBHD_DOMAINS: "${SUBHD_DOMAINS:-subhd.tv,subhd.me,subhd.one,subhd.top,subhd.cc,subhd.com}"
+      DOWNLOAD_INTERVAL_MS: "${DOWNLOAD_INTERVAL_MS:-1500}"
+      # 出口池（见 README「让 SubHD 从别的网络出去」）：留空就用本机 IP
+      SUBHD_PROXIES: "${SUBHD_PROXIES:-}"
+      SUBHD_PROXY_ATTEMPTS: "${SUBHD_PROXY_ATTEMPTS:-3}"
+      SUBHD_PROXY_COOLDOWN_MS: "${SUBHD_PROXY_COOLDOWN_MS:-90000}"
+      SUBHD_PROXY_MAX_COOLDOWN_MS: "${SUBHD_PROXY_MAX_COOLDOWN_MS:-1800000}"
+      SUBHD_PROXY_CONNECT_MS: "${SUBHD_PROXY_CONNECT_MS:-10000}"
+      # SUP/PGS 图形字幕一份常有几十上百 MB
+      MAX_ARCHIVE_BYTES: "${MAX_ARCHIVE_BYTES:-268435456}"
+      PREFETCH_NEIGHBORS: "${PREFETCH_NEIGHBORS:-2}"
+      INCLUDE_IMAGE_SUBTITLES: "${INCLUDE_IMAGE_SUBTITLES:-1}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:${PORT:-7000}/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+    # 日志别无限长：默认 json-file 会把容器日志留在宿主机上
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # 想让解压出来的字幕（可能上百 MB）落在内存盘而不是容器可写层，打开这两行：
+    # tmpfs:
+    #   - /tmp:size=2g

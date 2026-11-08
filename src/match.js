@@ -1,0 +1,360 @@
+// 迅雷 / 射手（伪）共用的「这条字幕到底是不是我要的那部片、那一集」判定。
+//
+// 照着 SubHD 那一路的思路来：
+//   1. 身份（对应 SubHD 的「作品页 imdb 对不上就不要」）：片名要出现、年份要对得上、
+//      电影不要剧集字幕。
+//   2. 季（对应 splitWorksBySeason）：名字里写了季号就必须是这一季；整季包、全剧合集留着，
+//      但排在正片后面。
+//   3. 集（对应 detectEpisodeInText）：写了集号就必须对得上，明确是别的集的直接丢掉。
+//
+// 只有一条「聪明」规则：文件/标题以英文片名打头、紧接着又是另一个英文词时，那是另一部片
+// （Friends.Lovers.1999 ≠ 老友记，Friends.S01E05 = 老友记）。
+
+const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff]/;
+
+export const normalize = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
+    .trim();
+
+export function cleanTitle(title) {
+  return String(title || '')
+    .replace(/\s*\((\d{4})\)\s*$/, '')
+    .replace(/\s*\(\d{4}[–-]\d*\)\s*$/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+export function firstYear(releaseInfo) {
+  return Number(String(releaseInfo || '').match(/(19|20)\d{2}/)?.[0]) || null;
+}
+
+// 片名里的虚词不算关键词；中文的「第几季 / 全N集」也不算
+const STOP_WORDS = new Set(['the', 'a', 'an', 'of', 'and', 'part', 'parts', 'vol', 'chapter', 'season']);
+const CJK_NOISE = /第\s*[零一二三四五六七八九十百千\d]+\s*[季集部]|全\s*\d+\s*集|合集|系列|花絮|幕后/g;
+
+// 通用词：单独出现证明不了「就是这部片」（《绝命毒师》的条目里到处是 bad）
+const GENERIC_WORDS = new Set([
+  'bad', 'good', 'man', 'men', 'woman', 'women', 'love', 'life', 'time', 'times', 'day', 'days',
+  'night', 'dark', 'black', 'white', 'red', 'blue', 'green', 'war', 'world', 'story', 'stories',
+  'last', 'first', 'new', 'old', 'big', 'little', 'lost', 'game', 'games', 'home', 'house',
+  'city', 'girl', 'girls', 'boy', 'boys', 'king', 'queen', 'star', 'stars', 'fire', 'water',
+  'dead', 'death', 'live', 'kill', 'killer', 'money', 'summer', 'winter', 'spring', 'fall',
+  'one', 'two', 'three', 'final', 'end', 'begins', 'returns', 'rising', 'legacy', 'super',
+  'more', 'less', 'high', 'low', 'road', 'away', 'back', 'up', 'out',
+]);
+
+export function titleTokens(title) {
+  return normalize(cleanTitle(title).replace(CJK_NOISE, ' '))
+    .split(' ')
+    .filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
+}
+
+export function yearsIn(text) {
+  return new Set(String(text || '').match(/(?<!\d)(19|20)\d{2}(?!\d)/g) || []);
+}
+
+// 「S01E04 / 1x04 / 第4集 / E04」→ 集号；范围（S01E01-08、全8集）返回 pack: true
+const EPISODE_RANGE_RE =
+  /S\d{1,2}\s*E\s*\d{1,3}\s*[-–~至]\s*E?\d{1,3}|第\s*\d{1,3}\s*[-–~至]\s*\d{1,3}\s*集|全\s*\d+\s*集/i;
+const EPISODE_PATTERNS = [
+  /S(\d{1,2})\s*E(\d{1,3})(?![\d-])/i,
+  /(?<![A-Za-z0-9])(\d{1,2})\s*[xX]\s*(\d{1,3})(?![\d-])/,
+  /第\s*(\d{1,3})\s*集/,
+  /(?<![A-Za-z])E(?:P|PISODE)?\.?\s*(\d{1,3})(?![\d-])/i,
+];
+
+export function episodeInfo(text) {
+  const source = String(text || '');
+  if (EPISODE_RANGE_RE.test(source)) return { season: null, episode: null, pack: true };
+  for (const [index, pattern] of EPISODE_PATTERNS.entries()) {
+    const match = source.match(pattern);
+    if (!match) continue;
+    return {
+      season: index <= 1 ? Number(match[1]) : null,
+      episode: Number(match[index <= 1 ? 2 : 1]) || null,
+      pack: false,
+    };
+  }
+  return { season: null, episode: null, pack: false };
+}
+
+// 「S03」这种单独的季号（后面不跟 E 集号，那样由 SEASON_WITH_EPISODE_RE 处理）
+const SEASON_PATTERNS = [
+  /第\s*([零一二三四五六七八九十百千\d]+)\s*季/,
+  /(?<![A-Za-z0-9])S(\d{1,2})(?![\dE])/i,
+  /season\s*(\d{1,2})/i,
+];
+const SEASON_WITH_EPISODE_RE = /(?<![A-Za-z0-9])S(\d{1,2})E\d{1,3}/i;
+
+const CHINESE_DIGITS = { 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+
+function chineseNumber(text) {
+  const value = String(text || '').trim();
+  if (/^\d+$/.test(value)) return Number(value);
+  let total = 0;
+  let current = 0;
+  for (const char of value) {
+    if (char === '十') {
+      total += (current || 1) * 10;
+      current = 0;
+    } else if (char === '百') {
+      total += (current || 1) * 100;
+      current = 0;
+    } else if (CHINESE_DIGITS[char] !== undefined) {
+      current = CHINESE_DIGITS[char];
+    }
+  }
+  return total + current;
+}
+
+// 「第3季」「第三季」「S03E01」「Season 3」→ 季号
+export function seasonInfo(text) {
+  const source = String(text || '');
+  const withEpisode = source.match(SEASON_WITH_EPISODE_RE);
+  if (withEpisode) return Number(withEpisode[1]);
+  for (const pattern of SEASON_PATTERNS) {
+    const match = source.match(pattern);
+    if (match) return chineseNumber(match[1]);
+  }
+  return null;
+}
+
+// 不是影视字幕的东西：音乐 MV / 歌词、演讲、球赛、纪录片短片、油管视频……迅雷的字幕库里
+// 这类东西很多（搜 The Greatest 能搜出 Sia 的 MV、MLB 集锦、贝索斯演讲）。宁可不显示，
+// 也别让用户在一堆无关的东西里找。
+const NOT_FILM_RE =
+  /\b(AV\d{4,}|BV\w{8,}|P\d)\b|歌词|lyrics|cover by|official video|music video|\bMV\b|卡拉OK|ktv|MLB|NBA|NFL|UFC|highlight|集锦|演讲|speech|ted ?x?\b|conference|访谈节目|podcast|vlog|shorts?\b|trailer|预告片/i;
+
+export const looksNotFilm = (text) => NOT_FILM_RE.test(String(text || ''));
+
+const EXTRA_RE =
+  /花絮|幕后|预告|制作特辑|访谈|解说|演职员表|删减|彩蛋|extras?|behind[ ._-]?the[ ._-]?scenes|trailer|featurette/i;
+
+export const looksExtra = (text) => EXTRA_RE.test(String(text || ''));
+
+// 整季合集 / 全剧合集
+const WHOLE_SHOW_RE = /S\d{1,2}\s*[-–~]\s*S?\d{1,2}|全\s*\d+\s*[季集]|全集|合集|Complete\s+(Series|Collection)/i;
+export const isWholeShow = (text) => WHOLE_SHOW_RE.test(String(text || ''));
+
+// 在「词边界」上找关键词（bad 不该命中 Bad.Language）
+function hasToken(haystack, token) {
+  if (token.length < 2) return false;
+  let from = 0;
+  while (from <= haystack.length) {
+    const index = haystack.indexOf(token, from);
+    if (index < 0) return false;
+    const before = index === 0 ? '' : haystack[index - 1];
+    const after = index + token.length >= haystack.length ? '' : haystack[index + token.length];
+    const boundary = (value) => value === '' || value === ' ' || !/[a-z0-9]/.test(value);
+    if (boundary(before) && boundary(after)) return true;
+    from = index + 1;
+  }
+  return false;
+}
+
+// 片名吻合度（0 = 不吻合）。中文整串（两字短名要有边界），英文按词边界。
+function matchTitle(title, haystack) {
+  const tokens = titleTokens(title);
+  if (tokens.length === 0) return 0;
+
+  if (CJK_RE.test(title) && tokens.every((token) => CJK_RE.test(token))) {
+    const needle = normalize(cleanTitle(title).replace(CJK_NOISE, ' '));
+    if (!needle) return 0;
+    const index = haystack.indexOf(needle);
+    if (index < 0) return 0;
+    if (needle.length <= 2) {
+      const before = index === 0 ? ' ' : haystack[index - 1];
+      const after = index + needle.length >= haystack.length ? ' ' : haystack[index + needle.length];
+      if (before !== ' ' || after !== ' ') return 0;
+    }
+    return 1 + needle.length * 0.001;
+  }
+
+  // 英文 / 混合片名：按「完整词序」比对（不再把 the 当停用词去掉 —— 否则
+  // The Greatest 只剩 greatest，「50 of the greatest MOVIE QUOTES」也会被当成命中）。
+  // 片名必须是名称段的开头：前面只能是季/集/年份标记或什么都没有。
+  const words = haystack.split(' ').filter(Boolean);
+  const needle = normalize(cleanTitle(title.replace(CJK_NOISE, ' ')))
+    .split(' ')
+    .filter(Boolean);
+  if (needle.length === 0) return 0;
+  // 全是 bad / man 这类通用词的片名，单独出现证明不了什么
+  if (!needle.some((token) => !GENERIC_WORDS.has(token))) return 0;
+
+  for (let i = 0; i + needle.length <= words.length; i += 1) {
+    if (!needle.every((word, k) => words[i + k] === word)) continue;
+    const before = words[i - 1] || '';
+    const after = words[i + needle.length] || '';
+    // 片名前面是 Sia / Apple / Marvel_s / of 这类别的英文词 → 只是字符串的一部分。
+    // 中文不用挡：「星期三.Wednesday.S02E08」里英文名前面就是中文译名，是同一部片。
+    if (before && !CJK_RE.test(before) && !/^(s\d{1,2}|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2})$/.test(before)) continue;
+    // 片名后面：季集标记 / 年份 / 画质 / 语言 / 中文注释 → 就是这部片
+    if (after && !FRIENDLY_SUFFIX_RE.test(after) && !LANGUAGE_SUFFIX_RE.test(after) && !CJK_RE.test(after)) {
+      if (!/^(the|a|an|and|of)$/.test(after)) continue;
+    }
+    return 1 + needle.length * 0.01;
+  }
+  return 0;
+}
+
+// 名字是不是「以这个英文片名打头」：是的话返回片名后面剩下的词，否则 null
+function titlePrefixRest(name, title) {
+  const words = name.split(' ').filter(Boolean);
+  const needle = normalize(title).split(' ').filter(Boolean);
+  if (needle.length === 0 || words.length < needle.length) return null;
+  for (let index = 0; index < needle.length; index += 1) {
+    if (words[index] !== needle[index]) return null;
+  }
+  return words.slice(needle.length);
+}
+
+// 这些词紧贴在片名前面时，说明片名只是被修饰的一个词（the REAL Greatest / 50 OF THE
+// greatest MOVIE quotes / Marvel's Greatest Villain），不是那部片
+const LEFT_NOISE_RE =
+  /^(the|a|an|real|really|greatest|best|worst|first|last|most|50|100|top|all|every|one|of|my|your|his|her|their|its|our|great|biggest|favourite|favorite|ultimate|movie|film|quotes|moments|scenes|speeches|hits|songs|games|game|show)$/;
+
+// 片名后面紧跟的这些东西说明「还是这部片」：S01 / 2024 / 第1集 / 1080p / chs / 中文注释
+// 片名后面紧跟：季/集标记、年份、画质、纯数字（Interstellar.2014.720p…；字幕站那种
+// 「….avi_1421217074 ansi-ad.srt」的数字串）
+const FRIENDLY_SUFFIX_RE = /^(s\d|season|ep|e\d|\d{1,4}(p|bit)?\d*|20\d{2}$)/;
+const LANGUAGE_SUFFIX_RE = /^(chs|cht|eng|gb|big5|zh|sc|tc|ra?r|sub|ass|srt|vtt|hdtv|web|bluray|bdrip|remux|dvdrip|x26[45]|h26[45]|aac|ac3|ddp|proper|repack|extended|imax|uhd|hdr|dv|10bit|8bit|双语|中英|简|繁)/;
+
+function looksLikeOtherFilm(name, titles) {
+  for (const title of titles) {
+    if (CJK_RE.test(title)) continue;
+    const rest = titlePrefixRest(name, title);
+    if (!rest || rest.length === 0) continue;
+    const next = rest[0];
+    if (FRIENDLY_SUFFIX_RE.test(next)) continue;
+    if (LANGUAGE_SUFFIX_RE.test(next)) continue;
+    if (CJK_RE.test(next)) continue;
+    // 后面这些词是发布名的常见尾巴，不构成「别的片」
+    if (/^(the|a|an|and|of|in|on|at|for|to|with|from|show|movie|film|series|part)$/.test(next)) continue;
+    // 「Dune」vs「Dune Part Two」：候选片名正好是从这里接着写的，是同一部片
+    const joined = normalize(` ${rest.join(' ')} `);
+    if (titles.some((other) => !CJK_RE.test(other) && other !== title && hasToken(joined, normalize(other).split(' ').pop()))) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 身份判定：这条字幕是不是「这部片」。
+ * @param {{ haystack: string, fileName?: string, headOnly?: boolean, head?: string }} item
+ * @param {{ titles: string[], aliases?: string[], year?: number|null, type: 'movie'|'series',
+ *           season?: number|null, episode?: number|null, needType?: boolean }} want
+ */
+export function checkIdentity(item, want) {
+  const raw = String(item.haystack || '');
+  const haystack = normalize(raw);
+  const titles = [...new Set([...want.titles, ...(want.aliases || [])].filter(Boolean))];
+
+  // 1) 片名
+  let best = 0;
+  for (const title of titles) best = Math.max(best, matchTitle(title, haystack));
+  if (best === 0) return { ok: false, score: 0, reason: '片名对不上' };
+
+  // 2) 「以片名打头，后面接别的英文词」→ 另一部片（文件名 / 射手条目标题）
+  const fileName = normalize(String(item.fileName || '').toLowerCase());
+  if (fileName && looksLikeOtherFilm(fileName, titles)) {
+    return { ok: false, score: 0, reason: '文件名是别的片' };
+  }
+  if (item.headOnly && item.head) {
+    const head = normalize(String(item.head).toLowerCase());
+    if (!titles.some((title) => matchTitle(title, head) > 0)) {
+      return { ok: false, score: 0, reason: '片名只出现在发布名后面' };
+    }
+
+    // 射手的标题是「片名/副标题」。片名后面紧跟的必须是季/集/年份/语言/中文这类修饰，
+    // 或者「另一个片名」，否则就是另一部片：
+    //   The Greatest S01E01 Fools Gold → 是
+    //   SCTV. The . Greatest .Show.Youve.Never.Heard.Of → 不是（The Greatest Show …）
+    //   The Greatest (2024).ITALIAN → 年份对不上，交给后面年份那条判
+    const words = head.split(' ').filter(Boolean);
+    let ok = false;
+    for (const title of titles) {
+      const needle = normalize(title).split(' ').filter(Boolean);
+      if (needle.length === 0) continue;
+      for (let i = 0; i + needle.length <= words.length; i += 1) {
+        if (!needle.every((word, k) => words[i + k] === word)) continue;
+        const next = words[i + needle.length];
+        if (!next) {
+          ok = true;
+          continue;
+        }
+        if (FRIENDLY_SUFFIX_RE.test(next) || LANGUAGE_SUFFIX_RE.test(next) || CJK_RE.test(next)) {
+          ok = true;
+          continue;
+        }
+        if (needle.length === 1 && /^(the|a|an|and|of)$/.test(next)) {
+          ok = true;
+          continue;
+        }
+      }
+    }
+    if (!ok) return { ok: false, score: 0, reason: '片名后面跟着别的词（是另一部片）' };
+  }
+
+  // 3) 季号：写了就必须是这一季
+  const season = seasonInfo(raw);
+  if (want.season && season !== null) {
+    if (season !== Number(want.season)) return { ok: false, score: 0, reason: `季号不符（要 S${want.season}）` };
+    best += 0.5;
+  }
+
+  // 4) 年份：写了年份就必须对得上。
+  //    以前给剧集放开 ±6 年（怕连载剧的整季包写着别的年份），后果是「The Greatest（2026）
+  //    的字幕列表里躺着一堆 The Greatest (2024)」—— 名字一模一样的两部片就是这么混在一起的。
+  //    现在只认同年（剧集允许 ±1，跨年的片子/分两季播的常见）。整季包本来就不写年份，
+  //    不受影响；真写成别的年份的，宁可不显示也不要给错片。
+  const years = yearsIn(raw);
+  if (want.year && years.size > 0) {
+    const wanted = Number(want.year);
+    const tolerance = want.type === 'series' ? 1 : 1;
+    if ([...years].every((year) => Math.abs(Number(year) - wanted) > tolerance)) {
+      return { ok: false, score: 0, reason: `年份不符（要 ${want.year}，这条是 ${[...years].join('/')}）` };
+    }
+    best += 1;
+  }
+
+  // 5) 电影不要剧集字幕（射手那边「坏蛋联盟」就是这么混进《绝命毒师》的）
+  if (want.type === 'movie' && want.needType !== false) {
+    const info = episodeInfo(raw);
+    if (info.episode || info.pack || /全\s*\d+\s*集|第\s*[零一二三四五六七八九十百千\d]+\s*季/i.test(raw)) {
+      return { ok: false, score: 0, reason: '是剧集的字幕' };
+    }
+  }
+
+  // 6) 不是影视字幕（MV / 歌词 / 球赛 / 演讲…）：不要
+  if (looksNotFilm(raw)) return { ok: false, score: 0, reason: '不是影视字幕' };
+
+  // 7) 整季 / 全剧合集、花絮：留着，但排在正片后面
+  if (want.type === 'series' && isWholeShow(raw)) best -= 0.3;
+  if (looksExtra(raw)) best -= 1.5;
+
+  return { ok: true, score: best, reason: '' };
+}
+
+/**
+ * 集判定：越小越靠前，null = 明确是别的集，不该出现。
+ */
+export function episodeRank(item, want) {
+  if (!want.episode) return 0;
+  const raw = String(item.haystack || '');
+
+  if (isWholeShow(raw)) return 3; // 全剧合集：留着，排最后
+  const info = episodeInfo(raw);
+  if (info.pack) return 3; // 整季包：留着，排最后
+  if (info.episode === null) {
+    // 没写集号：写了季号的算这一季的整季包，什么都没写的算整部剧
+    return seasonInfo(raw) !== null ? 3 : 2;
+  }
+  if (info.episode !== Number(want.episode)) return null; // 明确是别的集
+  const season = seasonInfo(raw);
+  if (season === null || !want.season) return 0;
+  return season === Number(want.season) ? 0 : 4; // 同集号、别的季
+}
+
+export { CJK_RE };

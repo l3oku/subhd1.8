@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["hkg1"],
+  "rewrites": [
+    { "source": "/", "destination": "/api/index?__subhd_path=/" },
+    { "source": "/:subhdPath*", "destination": "/api/index?__subhd_path=/:subhdPath*" }
+  ]
+}
