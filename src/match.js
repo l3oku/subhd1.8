@@ -66,6 +66,15 @@ const EPISODE_PATTERNS = [
   /(?<![A-Za-z])E(?:P|PISODE)?\.?\s*(\d{1,3})(?![\d-])/i,
 ];
 
+// 「权力的游戏2.ass」「沙丘2」这种：中文片名后面直接跟数字。
+// 剧集里这几乎都是集号（权力的游戏2 = 第2集），电影里是续集序号（沙丘2）—— 由调用方按类型决定。
+const CJK_TRAILING_NUMBER_RE = /([\u3400-\u4dbf\u4e00-\u9fff]{2,})[\s._-]*(\d{1,3})(?![\d.]\s*(?:\d{3,4}p|[A-Za-z]{2,}))/;
+
+export function cjkTrailingNumber(text) {
+  const match = String(text || '').match(CJK_TRAILING_NUMBER_RE);
+  return match ? { title: match[1], number: Number(match[2]) } : null;
+}
+
 export function episodeInfo(text) {
   const source = String(text || '');
   if (EPISODE_RANGE_RE.test(source)) return { season: null, episode: null, pack: true };
@@ -136,7 +145,8 @@ const EXTRA_RE =
 export const looksExtra = (text) => EXTRA_RE.test(String(text || ''));
 
 // 整季合集 / 全剧合集
-const WHOLE_SHOW_RE = /S\d{1,2}\s*[-–~]\s*S?\d{1,2}|全\s*\d+\s*[季集]|全集|合集|Complete\s+(Series|Collection)/i;
+const WHOLE_SHOW_RE =
+  /S\d{1,2}\s*[-–~]\s*S?\d{1,2}|第\s*\d+\s*[-–~]\s*\d+\s*季|全\s*\d+\s*[季集]|全集|合集|Complete\s+(Series|Collection)/i;
 export const isWholeShow = (text) => WHOLE_SHOW_RE.test(String(text || ''));
 
 // 在「词边界」上找关键词（bad 不该命中 Bad.Language）
@@ -311,10 +321,25 @@ export function checkIdentity(item, want) {
   return { ok: true, score: best, reason: '' };
 }
 
-// 迅雷会把一部分条目的文件名换成 40 位十六进制哈希（2B7CDDE5…srt），名字里什么信息都没有，
-// 这种条目只能靠 simple_name 里的片名来认。
+// 迅雷会把一部分条目的文件名截断成 10~12 个字符（「game.of.th」），或者换成 40 位十六进制哈希
+// （2B7CDDE5…srt）。这两种名字里什么信息都没有，分不清是哪一季、哪一集，用户点开就对不上 ——
+// 实测《权力的游戏》60 条里有 45 条是这样。这类条目要直接剔除，不能只靠 simple_name 的片名放行。
 const HASH_NAME_RE = /^[0-9a-f]{16,}\.(srt|ass|ssa|vtt)$/i;
 export const isHashName = (text) => HASH_NAME_RE.test(String(text || '').trim());
+
+// 文件名是否「截断/无信息」：去掉扩展名后只有几个词，且没有季集/年份/画质这些线索
+export function isTruncatedName(name) {
+  const value = String(name || '').trim();
+  if (!value) return true;
+  const base = value.replace(/\.[a-z0-9]{2,4}$/i, '');
+  if (HASH_NAME_RE.test(value)) return true;
+  // 长度很短（10~12 个字符，如 game.of.th）且没有任何可辨识线索 → 没法用
+  if (base.length <= 14) {
+    const hasInfo = /\d|第\s*\d+\s*[季集]|S\d{1,2}|EP?\d/i.test(base);
+    if (!hasInfo) return true;
+  }
+  return false;
+}
 
 // 中文：用户名和条目名的**最长公共片段**要同时满足两条才算同一部：
 //   ① 至少 4 个字（「恋爱中」3 个字太泛，会命中《恋爱中的女人》）
