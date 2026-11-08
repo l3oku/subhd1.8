@@ -8,6 +8,7 @@
 //   - 编码也不统一（GBK / Big5 / UTF-16 都见过），统一转成 UTF-8 再发出去，播放器才不乱码。
 import { extname } from 'node:path';
 import { fetchBinary, logSource } from './net.js';
+import { isProxyEnabled, proxyFetchBinary } from './proxy-cf.js';
 import { AppError, getArchiveFilesFromBuffer, subtitleTextFromArchive } from './subhd.js';
 import { TtlCache } from './cache.js';
 
@@ -89,7 +90,10 @@ export async function fetchSingleSubtitle(url, { referer = '', ext = '' } = {}) 
   const key = `file:${url}`;
   const hit = singleCache.get(key);
   if (hit) return hit;
-  const data = await fetchBinary(url, { referer, maxBytes: MAX_BYTES, timeoutMs: 40_000 });
+  // 迅雷的字幕文件在它自己的 CDN 上，和接口一样从机房连经常不通：配了代理就走代理。
+  const data = isProxyEnabled()
+    ? await proxyFetchBinary(url, { timeoutMs: 25_000, maxBytes: MAX_BYTES })
+    : await fetchBinary(url, { referer, maxBytes: MAX_BYTES, timeoutMs: 40_000 });
   const value = { data, ext: ext || extOfUrl(url), url };
   singleCache.set(key, value);
   return value;
