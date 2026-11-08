@@ -131,11 +131,22 @@ test('片名只是字符串的一部分时不算命中（Sia / Apple / SCTV）',
   }
 });
 
-test('迅雷的 simple_name 不参与判定（否则搜什么都「对上」）', () => {
-  const item = { simple_name: '简体[SRT]The Greatest', name: 'Sia - The Greatest.SRT' };
+test('迅雷 simple_name 里的中文片名参与判定（否则中文条目全丢）', () => {
+  // 「The Odyssey」57 条里有 35 条文件名是全中文的（奥德赛.srt），站点在 simple_name 里
+  // 写着「简体[SRT]奥德赛」—— 这截片名必须参与判定，不然全被当成「片名对不上」丢掉。
+  const item = { simple_name: '简体[SRT]奥德赛', name: '奥德赛.srt' };
   const haystack = thunderHaystack(item);
-  assert.equal(haystack, 'Sia - The Greatest.SRT');
-  assert.equal(checkIdentity({ haystack, fileName: item.name }, theGreatest).ok, false);
+  assert.match(haystack, /奥德赛/);
+  assert.doesNotMatch(haystack, /简体|SRT/); // 语言/格式标记不参与
+  assert.equal(
+    checkIdentity({ haystack, fileName: item.name }, { titles: ['The Odyssey'], aliases: ['奥德赛'], year: 2026, type: 'movie' }).ok,
+    true,
+  );
+
+  // 但光有 simple_name 也不能让别的片子过关：文件名以英文片名开头、后接别的词仍然要拒
+  const other = { simple_name: '简体[SRT]The Greatest', name: 'Sia - The Greatest.SRT' };
+  const want = { titles: ['The Greatest'], aliases: [], year: 2026, type: 'series' };
+  assert.equal(checkIdentity({ haystack: thunderHaystack(other), fileName: other.name }, want).ok, false);
 });
 
 test('英文名前面是中文译名时照常匹配（星期三.Wednesday）', () => {
