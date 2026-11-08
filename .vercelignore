@@ -1,0 +1,5 @@
+# Deployed as a Serverless Function (api/index.js), so the container recipe and
+# the test suite do not belong in the upload.
+Dockerfile
+docker-compose.yml
+test/
