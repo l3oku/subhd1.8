@@ -9,7 +9,8 @@ import {
   preferredExt,
   subtitlesHandler,
 } from './addon.js';
-import { fromBase64url, isThunderEnabled } from './thunder.js';
+import { fromBase64url, isThunderEnabled, thunderHaystack } from './thunder.js';
+import { checkIdentity } from './match.js';
 import { assrtArchive, assrtById, assrtDownloadHref, isAssrtEnabled, searchAssrt } from './assrt.js';
 import { extOfName, extractLangTag, fetchSingleSubtitle, isImageExt, isSingleSubtitle, loadSingle, subtitleFromInput } from './files.js';
 import { networkReport } from './diagnostics.js';
@@ -393,6 +394,16 @@ async function assrtTrack({ id, ext, season, episode, lang }) {
   return subtitleFromInput({ kind: 'archive', archive }, { targetExt: target, lang, season, episode });
 }
 
+// 首页搜索用：把迅雷的模糊结果裁成「片名和用户输入对得上」的那些
+function keepMatchingToys(keyword, items) {
+  const titles = [String(keyword || '').trim()].filter(Boolean);
+  if (titles.length === 0) return items;
+  const want = { titles, aliases: [], year: null, type: 'any', needType: false };
+  return items.filter((item) =>
+    Boolean(checkIdentity({ haystack: thunderHaystack(item), fileName: item.name }, want).ok),
+  );
+}
+
 async function sourceSearch(source, keyword) {
   if (source === 'thunder') {
     const { searchThunder, thunderSearchFallback } = await import('./thunder.js');
@@ -402,6 +413,9 @@ async function sourceSearch(source, keyword) {
       // 迅雷的索引挂的是「条目名」：中文片名经常搜不到，但它的英文名一搜就是一堆中文文件
       // （搜「奥德赛」0 条，搜「The Odyssey」57 条全叫「奥德赛.srt」）。中文没结果就换英文再搜。
       if (items.length === 0) items = await thunderSearchFallback(keyword);
+      // 迅雷是模糊搜索，原始结果里混着一堆不相干的（搜「黑暗召唤师在地下恋爱中」会返回
+      // 《恋爱中的女人》《召唤师技能推荐》…）。首页搜索以前直接原样返回，现在按片名过滤。
+      items = keepMatchingToys(keyword, items);
     } catch (error) {
       // 迅雷接口在部分机房/网络连不上：给一句人话，别把「This operation was aborted」丢给用户
       throw new AppError(
