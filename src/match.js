@@ -59,7 +59,8 @@ export function yearsIn(text) {
 const EPISODE_RANGE_RE =
   /S\d{1,2}\s*E\s*\d{1,3}\s*[-–~至]\s*E?\d{1,3}|第\s*\d{1,3}\s*[-–~至]\s*\d{1,3}\s*集|全\s*\d+\s*集/i;
 const EPISODE_PATTERNS = [
-  /S(\d{1,2})\s*E(\d{1,3})(?![\d-])/i,
+  // S01E03 / S01.E03 / S01 E03 / S01-E03（迅雷里有大量「S01.E03」这种带点或空格的写法）
+  /S(\d{1,2})[\s._-]*E(\d{1,3})(?![\d-])/i,
   /(?<![A-Za-z0-9])(\d{1,2})\s*[xX]\s*(\d{1,3})(?![\d-])/,
   /第\s*(\d{1,3})\s*集/,
   /(?<![A-Za-z])E(?:P|PISODE)?\.?\s*(\d{1,3})(?![\d-])/i,
@@ -86,7 +87,7 @@ const SEASON_PATTERNS = [
   /(?<![A-Za-z0-9])S(\d{1,2})(?![\dE])/i,
   /season\s*(\d{1,2})/i,
 ];
-const SEASON_WITH_EPISODE_RE = /(?<![A-Za-z0-9])S(\d{1,2})E\d{1,3}/i;
+const SEASON_WITH_EPISODE_RE = /(?<![A-Za-z0-9])S(\d{1,2})[\s._-]*E\d{1,3}/i;
 
 const CHINESE_DIGITS = { 零: 0, 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
 
@@ -246,6 +247,10 @@ function looksLikeOtherFilm(name, titles) {
  * @param {{ titles: string[], aliases?: string[], year?: number|null, type: 'movie'|'series',
  *           season?: number|null, episode?: number|null, needType?: boolean }} want
  */
+// 迅雷会把一部分条目的文件名换成 40 位十六进制哈希（2B7CDDE5…srt），名字里什么信息都没有。
+const HASH_NAME_RE = /^[0-9a-f]{16,}\.(srt|ass|ssa|vtt)$/i;
+export const isHashName = (text) => HASH_NAME_RE.test(String(text || '').trim());
+
 export function checkIdentity(item, want) {
   const raw = String(item.haystack || '');
   const haystack = normalize(raw);
@@ -254,7 +259,12 @@ export function checkIdentity(item, want) {
   // 1) 片名
   let best = 0;
   for (const title of titles) best = Math.max(best, matchTitle(title, haystack));
-  if (best === 0) return { ok: false, score: 0, reason: '片名对不上' };
+  if (best === 0) {
+    // 文件名是哈希的：不知道它是哪部片，但它确实是从「搜这部片」里出来的，留着让用户自己挑，
+    // 只是排在最后（不给分数加成）。
+    if (isHashName(item.fileName || item.haystack)) return { ok: true, score: 0.1, reason: '文件名是哈希' };
+    return { ok: false, score: 0, reason: '片名对不上' };
+  }
 
   // 2) 「以片名打头，后面接别的英文词」→ 另一部片（文件名 / 射手条目标题）
   const fileName = normalize(String(item.fileName || '').toLowerCase());
@@ -343,6 +353,8 @@ export function checkIdentity(item, want) {
 export function episodeRank(item, want) {
   if (!want.episode) return 0;
   const raw = String(item.haystack || '');
+  // 哈希文件名：看不出是哪一集，留着排最后（用户点开自己看）
+  if (isHashName(item.haystack)) return 2;
 
   if (isWholeShow(raw)) return 3; // 全剧合集：留着，排最后
   const info = episodeInfo(raw);
