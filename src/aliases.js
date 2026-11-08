@@ -106,6 +106,37 @@ export const TITLE_ALIASES = {
   gravity: ['地心引力'],
 };
 
+// 中文 → 英文原名（上面表的反向）。迅雷的字幕库按英文条目名建索引，中文片名常常搜不到
+// （实搜「奥德赛」0 条、「The Odyssey」57 条），所以中文没结果时反过来用英文搜一次。
+function buildReverse() {
+  const map = new Map();
+  for (const [english, chineseList] of Object.entries(TITLE_ALIASES)) {
+    for (const chinese of chineseList) {
+      const key = String(chinese).trim();
+      if (!key || /^[a-z0-9\s:]+$/i.test(key)) continue; // 只收中文名
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(english);
+    }
+  }
+  return map;
+}
+
+const REVERSE_ALIASES = buildReverse();
+
+/** 中文片名 → 可能的英文原名（用于「中文搜不到时换英文搜」） */
+export function englishFor(chineseTitle) {
+  const raw = String(chineseTitle || '').trim();
+  if (!raw) return [];
+  const exact = REVERSE_ALIASES.get(raw) || [];
+  if (exact.length > 0) return [...exact];
+  // 「奥德赛」这种整串没收录时，退一步找包含它的键（「沙丘2」「沙丘：第二部」都归到 dune）
+  const fuzzy = [];
+  for (const [chinese, english] of REVERSE_ALIASES) {
+    if (raw.includes(chinese) || chinese.includes(raw)) fuzzy.push(...english);
+  }
+  return [...new Set(fuzzy)];
+}
+
 // 名字 → 中文译名列表（大小写、标点都不敏感）
 // 片名的「近似问法」：别名表里没收录的片子，也尽量多试一种查法 ——
 // 迅雷 / 射手的中文条目常常只写中文名，而英文名搜不到中文条目。
