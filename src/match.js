@@ -243,93 +243,57 @@ function looksLikeOtherFilm(name, titles) {
 
 /**
  * 身份判定：这条字幕是不是「这部片」。
- * @param {{ haystack: string, fileName?: string, headOnly?: boolean, head?: string }} item
- * @param {{ titles: string[], aliases?: string[], year?: number|null, type: 'movie'|'series',
- *           season?: number|null, episode?: number|null, needType?: boolean }} want
+ *
+ * 迅雷是**模糊搜索**：搜「黑暗召唤师在地下恋爱中」返回 18 条（恋爱中的女人、召唤师技能推荐…）
+ * 外加 1 条真的（`黑暗召唤师在地下恋爱中第3集.ass`）。以前要求「片名整串出现」才算，
+ * 那 1 条真的也被丢掉 —— 这是「搜不到东西」的根本原因。
+ *
+ * 所以改用 SubHD 那种「按作品认片」的思路：算用户名和条目名的**最长公共片段**，
+ * 够长就算同一部（中文 ≥3 字 / 英文 ≥2 个词）。硬性排除照旧保留：
+ * 年份不符、季号不符、片名被别的实词接住（Sia - The Greatest）、被修饰（50 of the greatest…）、
+ * 不是影视字幕（MV / 球赛 / 演讲）。
  */
-// 迅雷会把一部分条目的文件名换成 40 位十六进制哈希（2B7CDDE5…srt），名字里什么信息都没有。
-const HASH_NAME_RE = /^[0-9a-f]{16,}\.(srt|ass|ssa|vtt)$/i;
-export const isHashName = (text) => HASH_NAME_RE.test(String(text || '').trim());
-
 export function checkIdentity(item, want) {
   const raw = String(item.haystack || '');
   const haystack = normalize(raw);
   const titles = [...new Set([...want.titles, ...(want.aliases || [])].filter(Boolean))];
+  if (titles.length === 0) return { ok: false, score: 0, reason: '没有片名可比' };
 
-  // 1) 片名
+  // 1) 片名：整串命中优先；不中就算最长公共片段
   let best = 0;
-  for (const title of titles) best = Math.max(best, matchTitle(title, haystack));
-  if (best === 0) {
-    // 文件名是哈希的：不知道它是哪部片，但它确实是从「搜这部片」里出来的，留着让用户自己挑，
-    // 只是排在最后（不给分数加成）。
-    if (isHashName(item.fileName || item.haystack)) return { ok: true, score: 0.1, reason: '文件名是哈希' };
-    return { ok: false, score: 0, reason: '片名对不上' };
+  for (const title of titles) {
+    best = Math.max(best, matchTitle(title, haystack), sharedRun(title, haystack, want));
   }
+  if (best === 0) return { ok: false, score: 0, reason: '片名对不上' };
 
-  // 2) 「以片名打头，后面接别的英文词」→ 另一部片（文件名 / 射手条目标题）
+  // 2) 「以片名打头、后面接别的实词」→ 另一部片（Sia - The Greatest / SCTV The Greatest Show）
+  if (item.headOnly && item.head) {
+    const head = normalize(String(item.head).toLowerCase());
+    if (looksLikeOtherFilm(head, titles)) return { ok: false, score: 0, reason: '片名后面跟着别的词（是另一部片）' };
+  }
   const fileName = normalize(String(item.fileName || '').toLowerCase());
   if (fileName && looksLikeOtherFilm(fileName, titles)) {
     return { ok: false, score: 0, reason: '文件名是别的片' };
   }
-  if (item.headOnly && item.head) {
-    const head = normalize(String(item.head).toLowerCase());
-    if (!titles.some((title) => matchTitle(title, head) > 0)) {
-      return { ok: false, score: 0, reason: '片名只出现在发布名后面' };
-    }
-
-    // 射手的标题是「片名/副标题」。片名后面紧跟的必须是季/集/年份/语言/中文这类修饰，
-    // 或者「另一个片名」，否则就是另一部片：
-    //   The Greatest S01E01 Fools Gold → 是
-    //   SCTV. The . Greatest .Show.Youve.Never.Heard.Of → 不是（The Greatest Show …）
-    //   The Greatest (2024).ITALIAN → 年份对不上，交给后面年份那条判
-    const words = head.split(' ').filter(Boolean);
-    let ok = false;
-    for (const title of titles) {
-      const needle = normalize(title).split(' ').filter(Boolean);
-      if (needle.length === 0) continue;
-      for (let i = 0; i + needle.length <= words.length; i += 1) {
-        if (!needle.every((word, k) => words[i + k] === word)) continue;
-        const next = words[i + needle.length];
-        if (!next) {
-          ok = true;
-          continue;
-        }
-        if (FRIENDLY_SUFFIX_RE.test(next) || LANGUAGE_SUFFIX_RE.test(next) || CJK_RE.test(next)) {
-          ok = true;
-          continue;
-        }
-        if (needle.length === 1 && /^(the|a|an|and|of)$/.test(next)) {
-          ok = true;
-          continue;
-        }
-      }
-    }
-    if (!ok) return { ok: false, score: 0, reason: '片名后面跟着别的词（是另一部片）' };
-  }
 
   // 3) 季号：写了就必须是这一季
   const season = seasonInfo(raw);
-  if (want.season && season !== null) {
-    if (season !== Number(want.season)) return { ok: false, score: 0, reason: `季号不符（要 S${want.season}）` };
-    best += 0.5;
+  if (want.season && season !== null && season !== Number(want.season)) {
+    return { ok: false, score: 0, reason: `季号不符（要 S${want.season}）` };
   }
+  if (want.season && season === Number(want.season)) best += 0.5;
 
-  // 4) 年份：写了年份就必须对得上。
-  //    以前给剧集放开 ±6 年（怕连载剧的整季包写着别的年份），后果是「The Greatest（2026）
-  //    的字幕列表里躺着一堆 The Greatest (2024)」—— 名字一模一样的两部片就是这么混在一起的。
-  //    现在只认同年（剧集允许 ±1，跨年的片子/分两季播的常见）。整季包本来就不写年份，
-  //    不受影响；真写成别的年份的，宁可不显示也不要给错片。
+  // 4) 年份：写了就必须对得上（±1 年，跨年上映很常见）
   const years = yearsIn(raw);
   if (want.year && years.size > 0) {
     const wanted = Number(want.year);
-    const tolerance = want.type === 'series' ? 1 : 1;
-    if ([...years].every((year) => Math.abs(Number(year) - wanted) > tolerance)) {
-      return { ok: false, score: 0, reason: `年份不符（要 ${want.year}，这条是 ${[...years].join('/')}）` };
+    if ([...years].every((year) => Math.abs(Number(year) - wanted) > 1)) {
+      return { ok: false, score: 0, reason: `年份不符（要 ${want.year}）` };
     }
     best += 1;
   }
 
-  // 5) 电影不要剧集字幕（射手那边「坏蛋联盟」就是这么混进《绝命毒师》的）
+  // 5) 电影不要剧集字幕
   if (want.type === 'movie' && want.needType !== false) {
     const info = episodeInfo(raw);
     if (info.episode || info.pack || /全\s*\d+\s*集|第\s*[零一二三四五六七八九十百千\d]+\s*季/i.test(raw)) {
@@ -337,14 +301,66 @@ export function checkIdentity(item, want) {
     }
   }
 
-  // 6) 不是影视字幕（MV / 歌词 / 球赛 / 演讲…）：不要
+  // 6) 不是影视字幕（MV / 歌词 / 球赛 / 演讲…）
   if (looksNotFilm(raw)) return { ok: false, score: 0, reason: '不是影视字幕' };
 
-  // 7) 整季 / 全剧合集、花絮：留着，但排在正片后面
+  // 7) 整季合集、花絮：留着，排后面
   if (want.type === 'series' && isWholeShow(raw)) best -= 0.3;
   if (looksExtra(raw)) best -= 1.5;
 
   return { ok: true, score: best, reason: '' };
+}
+
+// 迅雷会把一部分条目的文件名换成 40 位十六进制哈希（2B7CDDE5…srt），名字里什么信息都没有，
+// 这种条目只能靠 simple_name 里的片名来认。
+const HASH_NAME_RE = /^[0-9a-f]{16,}\.(srt|ass|ssa|vtt)$/i;
+export const isHashName = (text) => HASH_NAME_RE.test(String(text || '').trim());
+
+// 中文：用户名和条目名的**最长公共片段**要同时满足两条才算同一部：
+//   ① 至少 4 个字（「恋爱中」3 个字太泛，会命中《恋爱中的女人》）
+//   ② 至少占片名的 50%（「黑暗召唤师在地下恋爱中第3集」命中 10/11 字 → 认；
+//      「离婚律师恋爱中」只命中 3 个字 → 不认）
+// 片名本身不足 4 个字的（「沙丘」「越狱」）走另一条：整串出现，且前后要有边界。
+// 英文：公共词数 ≥2 个词，占片名一半以上。
+const MIN_CJK_SHARED = 4;
+
+export function sharedRun(title, haystack, want = null) {
+  const needle = normalize(cleanTitle(title).replace(CJK_NOISE, ' '));
+  if (!needle) return 0;
+
+  if (CJK_RE.test(needle)) {
+    const cjkTitle = (needle.match(/[\u3400-\u4dbf\u4e00-\u9fff]+/g) || []).join('');
+    const cjkHay = (haystack.match(/[\u3400-\u4dbf\u4e00-\u9fff]/g) || []).join('');
+    // 短片名（「校园」「越狱」这种 2~3 个字）：只能整串命中，而且要在「词的开头」出现
+    // —— 搜「校园」要能出「校园接送恋曲」，但不能出「小小的我」。
+    if (cjkTitle.length < MIN_CJK_SHARED) {
+      if (!cjkHay.includes(cjkTitle)) return 0;
+      // 短片名最容易撞上「同名续集 / 同名前缀」，交给年份把关（沙丘 2021 vs 沙丘奇兵 1990）
+      if (want && want.year) {
+        const years = yearsIn(haystack);
+        if (years.size > 0 && ![...years].some((y) => Math.abs(Number(y) - Number(want.year)) <= 1)) return 0;
+      }
+      // 条目名往往直接以它开头（校园接送恋曲第1集），或者用分隔符隔开
+      if (cjkHay.startsWith(cjkTitle)) return 0.9;
+      if (new RegExp(`[\\s\\u00b7:：\\-—_]${cjkTitle}`).test(cjkHay)) return 0.8;
+      return 0;
+    }
+    const required = Math.max(MIN_CJK_SHARED, Math.ceil(cjkTitle.length * 0.5));
+    for (let len = cjkTitle.length; len >= required; len -= 1) {
+      for (let start = 0; start + len <= cjkTitle.length; start += 1) {
+        if (cjkHay.includes(cjkTitle.slice(start, start + len))) {
+          return 0.5 + (len / cjkTitle.length) * 0.5;
+        }
+      }
+    }
+    return 0;
+  }
+
+  const words = needle.split(' ').filter((w) => w.length >= 2 && !STOP_WORDS.has(w));
+  if (words.length < 2) return 0;
+  const hits = words.filter((word) => hasToken(haystack, word)).length;
+  if (hits < 2) return 0;
+  return 0.5 + (hits / words.length) * 0.5;
 }
 
 /**
