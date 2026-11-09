@@ -39,7 +39,8 @@
 - **迅雷可以走 Cloudflare 出口**：Vercel 的机房连迅雷经常 Connect Timeout，而实测 Cloudflare 香港
   节点 5/5 成功（0.4~1 秒）。配上 `THUNDER_PROXY_URL` / `THUNDER_PROXY_SECRET` 后，迅雷这一路
   （接口 + 字幕 CDN）改从你的 CF Worker 出去，其它来源照旧。Worker 代码在 `tools/cf-proxy/`，
-  部署步骤见那里的 README。不配就是直连，行为不变。
+  **完整部署步骤（含 `PROXY_SECRET` 怎么生成、怎么在 Cloudflare / Vercel 两端填）见
+  [`tools/cf-proxy/README.md`](tools/cf-proxy/README.md)**。不配就是直连，行为不变。
 - **冷启动放宽预算**：函数刚起来时 DNS / 连接池是空的，首次请求给 `SOURCE_DEADLINE_COLD_MS`
   （默认 8 秒），之后回到 `SOURCE_DEADLINE_MS`（3.5 秒）。
 - **迅雷 http / https 双协议并发**：两个都发，谁先回有效结果用谁（不同机房下两者快慢差别很大）。
