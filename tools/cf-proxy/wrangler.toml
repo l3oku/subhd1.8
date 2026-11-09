@@ -1,0 +1,11 @@
+# 一键部署（Deploy to Cloudflare 按钮）和 `wrangler deploy` 都用这份配置。
+name = "subhd-thunder-proxy"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+# 密钥不放这里：PROXY_SECRET 用 `wrangler secret put PROXY_SECRET` 设置，
+# 或在 Cloudflare 仪表盘的 Worker → Settings → Variables and Secrets 里加（类型选 Secret）。
+# 生成方法见 README / .dev.vars.example。
+
+[observability]
+enabled = true
