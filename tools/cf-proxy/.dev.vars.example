@@ -1,0 +1,8 @@
+# 复制成 .dev.vars 后填上你自己的值（.dev.vars 不要提交进仓库）。
+#
+# PROXY_SECRET 是**你自己生成**的一串随机密码，不是从 Cloudflare 拿的。
+# 生成：openssl rand -hex 16      →  得到 32 位，例如 9f2c7a1e4b8d3560c1e9a7b2d4f61350
+# 这串要同时填到两处，必须完全一致：
+#   1) Cloudflare Worker 的 Secret：PROXY_SECRET
+#   2) Vercel 项目的环境变量：THUNDER_PROXY_SECRET
+PROXY_SECRET=
