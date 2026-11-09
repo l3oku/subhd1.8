@@ -26,78 +26,176 @@ export function landingPage({ baseUrl }) {
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SubHD 中文字幕 · Stremio 插件</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>中文字幕 · Stremio 插件</title>
 <link rel="icon" href="/assets/logo.svg">
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; background: #0e1117; color: #e6edf3; }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 32px 20px 80px; }
-  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
-  header img { width: 56px; height: 56px; border-radius: 12px; }
-  h1 { font-size: 24px; margin: 0; }
-  .sub { color: #9aa7b4; font-size: 14px; margin-top: 4px; }
-  .card { background: #161b22; border: 1px solid #232b36; border-radius: 14px; padding: 18px; margin-top: 20px; }
-  a.button, button.button { display: inline-block; background: linear-gradient(-45deg,#0443a2,#009bde); color: #fff; text-decoration: none; border: 0; border-radius: 10px; padding: 10px 18px; font-size: 15px; cursor: pointer; }
-  code { background: #0b0f14; border: 1px solid #232b36; border-radius: 6px; padding: 2px 6px; font-size: 13px; word-break: break-all; }
-  .search { display: flex; gap: 8px; margin-top: 12px; }
-  input[type=search] { flex: 1; background: #0b0f14; border: 1px solid #232b36; border-radius: 10px; padding: 11px 14px; color: #e6edf3; font-size: 15px; }
-  .hint { color: #9aa7b4; font-size: 13px; margin-top: 10px; line-height: 1.7; }
-  ul.results { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 10px; }
-  li.item { display: flex; gap: 12px; background: #12171e; border: 1px solid #232b36; border-radius: 12px; padding: 12px; }
-  li.item img { width: 56px; border-radius: 8px; align-self: flex-start; object-fit: cover; }
-  .meta { flex: 1; min-width: 0; }
-  .title { font-weight: 600; margin-bottom: 4px; }
-  .file { color: #9aa7b4; font-size: 13px; word-break: break-all; }
-  .tags { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
-  .tag { border: 1px solid #2b3646; border-radius: 999px; padding: 2px 8px; color: #b8c4d1; }
+  :root {
+    color-scheme: dark;
+    --bg: #0e1117;
+    --card: #161b22;
+    --line: #232b36;
+    --text: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #009bde;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { overflow-x: hidden; }           /* 手机上别让内容把页面撑宽 */
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 20px 16px calc(48px + env(safe-area-inset-bottom));
+  }
+
+  /* ── 顶部 ── */
+  header { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  header img { width: 48px; height: 48px; border-radius: 12px; flex: none; }
+  header .titles { min-width: 0; }
+  h1 { font-size: 19px; margin: 0; line-height: 1.3; }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 16px;
+    margin-top: 16px;
+  }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+
+  a.button, button.button {
+    display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(-45deg, #0443a2, #009bde);
+    color: #fff; text-decoration: none; border: 0; border-radius: 10px;
+    padding: 11px 18px; font-size: 15px; font-family: inherit; cursor: pointer;
+    min-height: 42px;
+  }
+  a.button:active, button.button:active { opacity: .85; }
+
+  /* ── 安装地址：整行一块，点一下复制 ── */
+  .copy-row {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 14px;
+    background: #0b0f14;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 10px 10px 12px;
+    min-width: 0;
+  }
+  .copy-row .label { color: var(--muted); font-size: 12px; flex: none; }
+  .copy-row code {
+    flex: 1 1 auto; min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #cfd8e3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    direction: ltr;
+  }
+  .copy-btn {
+    flex: none;
+    background: #1f2937; color: #cfd8e3; border: 1px solid #2b3646;
+    border-radius: 8px; padding: 7px 12px; font-size: 13px; font-family: inherit; cursor: pointer;
+  }
+  .copy-btn:active { background: #263242; }
+  .copy-btn.done { background: #14532d; border-color: #2f6f3f; color: #86efac; }
+
+  .hint { color: var(--muted); font-size: 13px; margin-top: 12px; line-height: 1.65; }
+
+  /* ── 搜索 ── */
+  .search { display: flex; flex-direction: column; gap: 8px; }
+  .search input[type=search], .search select {
+    width: 100%;
+    background: #0b0f14; border: 1px solid var(--line); border-radius: 10px;
+    padding: 11px 12px; color: var(--text); font-size: 16px;  /* 16px：避免 iOS 聚焦时自动放大 */
+    font-family: inherit;
+  }
+  .search select { appearance: none; background-image: none; }
+
+  ul.results { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 10px; }
+  li.item {
+    display: flex; gap: 12px; align-items: flex-start;
+    background: #12171e; border: 1px solid var(--line); border-radius: 12px; padding: 12px;
+    min-width: 0;
+  }
+  li.item img { width: 52px; border-radius: 8px; flex: none; object-fit: cover; }
+  .meta { flex: 1 1 auto; min-width: 0; }
+  .title { font-weight: 600; font-size: 14px; word-break: break-word; }
+  .file { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 2px; }
+  .tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+  .tag { border: 1px solid #2b3646; border-radius: 999px; padding: 1px 8px; color: #b8c4d1; white-space: nowrap; }
   .tag.badge { border-color: #2f6f3f; color: #7ee2a8; }
-  .actions { display: flex; flex-direction: column; gap: 8px; justify-content: center; }
-  .actions a { white-space: nowrap; }
-  .ghost { background: transparent; border: 1px solid #2b3646; color: #c9d4e0; border-radius: 10px; padding: 8px 14px; text-decoration: none; font-size: 14px; text-align: center; }
-  .status { color: #9aa7b4; font-size: 14px; margin-top: 14px; }
+  .actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
+  .actions .button { padding: 8px 14px; font-size: 14px; min-height: 38px; }
+  .ghost {
+    background: transparent; border: 1px solid #2b3646; color: #c9d4e0;
+    border-radius: 10px; padding: 7px 12px; text-decoration: none; font-size: 13px;
+    text-align: center; white-space: nowrap;
+  }
+  .status { color: var(--muted); font-size: 13px; margin-top: 12px; }
+  .status:empty { display: none; }
   .error { color: #ff8080; }
-  h2 { font-size: 17px; margin: 26px 0 0; }
+
+  /* ── 窄屏（手机）── */
+  @media (max-width: 640px) {
+    .wrap { padding: 16px 14px calc(40px + env(safe-area-inset-bottom)); }
+    h1 { font-size: 17px; }
+    header img { width: 42px; height: 42px; }
+    li.item { flex-wrap: wrap; }
+    /* 手机上下载按钮排成一行，占满整宽，不再挤在右边导致页面变宽 */
+    .actions { flex-direction: row; flex-wrap: wrap; width: 100%; gap: 8px; }
+    .actions .button, .ghost { flex: 1 1 auto; }
+    .meta { width: 100%; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <img src="/assets/logo.svg" alt="SubHD">
-    <div>
-      <h1>SubHD 中文字幕 · Stremio 插件</h1>
-      <div class="sub">搜索 subhd.tv 的字幕，并在 Stremio 里直接播放时加载</div>
+    <img src="/assets/logo.svg" alt="">
+    <div class="titles">
+      <h1>中文字幕 · Stremio 插件</h1>
+      <div class="sub">SubHD · 迅雷 · 射手(伪)</div>
     </div>
   </header>
 
   <div class="card">
     <a class="button" href="${escapeHtml(installUrl)}">在 Stremio 中安装</a>
-    <div class="hint">
-      手动安装地址：<code>${escapeHtml(manifestUrl)}</code><br>
-      安装后：Stremio 打开任意影片 → 字幕 → 选择 “SubHD 中文字幕”；或在发现页选择本插件的目录搜索片名。
+
+    <div class="copy-row">
+      <span class="label">安装地址</span>
+      <code id="manifest-url">${escapeHtml(manifestUrl)}</code>
+      <button class="copy-btn" type="button" id="copy-btn">复制</button>
     </div>
+
+    <div class="hint">安装后：Stremio 打开任意影片 → 字幕 → 选「SubHD + 迅雷 + 射手(伪) 字幕」。</div>
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0">网页搜索下载</h2>
+    <h2>网页搜索下载</h2>
     <form class="search" id="form">
-      <input type="search" id="q" placeholder="输入片名，例如：沙丘 / 怪奇物语 / tt4574334" autocomplete="off">
-      <select id="source" style="background:#0b0f14;border:1px solid #232b36;border-radius:10px;color:#e6edf3;padding:11px 10px;font-size:14px">
+      <input type="search" id="q" placeholder="片名，例如：沙丘 / 怪奇物语 / tt4574334" autocomplete="off" enterkeyhint="search">
+      <select id="source">
         <option value="subhd">SubHD</option>
         <option value="thunder">迅雷</option>
         <option value="assrt">射手(伪)</option>
       </select>
       <button class="button" type="submit">搜索</button>
     </form>
-    <div class="hint">支持中文名、英文名和 IMDb ID。SubHD：点「下载」得到 SRT/ASS 文本；迅雷 / 射手(伪)：点「下载」由插件服务器取文件并转成 UTF-8。</div>
+    <div class="hint">支持中文名、英文名、IMDb ID。点「下载」直接拿到转好码的字幕文件。</div>
     <div class="status" id="status"></div>
     <ul class="results" id="results"></ul>
   </div>
 
-  <div class="hint" style="margin-top:22px">
-    仅供学习交流使用，字幕版权归原作者所有。
-  </div>
+  <div class="hint">仅供学习交流使用，字幕版权归原作者所有。</div>
 </div>
 <script>
 const form = document.getElementById('form');
@@ -106,6 +204,36 @@ const input = document.getElementById('q');
 const status = document.getElementById('status');
 const results = document.getElementById('results');
 const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+
+/* 安装地址：点一下复制（不再需要长按选中） */
+const copyBtn = document.getElementById('copy-btn');
+const manifestText = document.getElementById('manifest-url').textContent;
+copyBtn.addEventListener('click', async () => {
+  const original = '复制';
+  let ok = false;
+  try {
+    // 现代浏览器 / iOS Safari 14+ 都能用
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(manifestText);
+      ok = true;
+    }
+  } catch {}
+  if (!ok) {
+    // 老浏览器 / 非 https：退回临时 textarea 选中复制
+    const ta = document.createElement('textarea');
+    ta.value = manifestText;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    try { ok = document.execCommand('copy'); } catch {}
+    document.body.removeChild(ta);
+  }
+  copyBtn.textContent = ok ? '已复制' : '请长按';
+  copyBtn.classList.toggle('done', ok);
+  setTimeout(() => { copyBtn.textContent = original; copyBtn.classList.remove('done'); }, 1600);
+});
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
