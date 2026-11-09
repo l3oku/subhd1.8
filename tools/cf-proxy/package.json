@@ -1,0 +1,23 @@
+{
+  "name": "subhd-thunder-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cloudflare Worker：给 Stremio 中文字幕插件里的「迅雷」这一路做出口代理",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "cloudflare": {
+    "bindings": {
+      "PROXY_SECRET": {
+        "description": "**必填**。这个是**你自己生成**的一串随机密码，不是从 Cloudflare 拿的。它用来让插件服务器证明「自己是这个 Worker 的合法调用方」。生成方法：在终端执行 `openssl rand -hex 16`（得到 32 位字符）。**请把这串记下来**，稍后还要填到 Vercel 的 `THUNDER_PROXY_SECRET` 里，两边必须完全一致。"
+      }
+    }
+  },
+  "devDependencies": {
+    "wrangler": "^3.90.0"
+  }
+}
