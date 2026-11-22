@@ -410,4 +410,67 @@ export function episodeRank(item, want) {
   return season === Number(want.season) ? 0 : 4; // 同集号、别的季
 }
 
+// Provider search results are not IMDb-linked. Require a complete title in a
+// title-bearing field; release metadata may veto a hit, but cannot establish it.
+const PROVIDER_SUFFIX_RE = /^(?:s\d{1,2}(?:e\d{1,3})?|e(?:p)?\d{1,3}|\d{1,2}x\d{1,3}|season|episode|(?:19|20)\d{2}|\d{3,4}p|4k|chs|cht|eng|en|zh|sc|tc|gb|big5|srt|ass|ssa|vtt|sup|mkv|mp4|avi|web|webdl|webrip|bluray|bdrip|hdtv|remux|dvdrip|complete|extended|repack)$/i;
+const PROVIDER_CJK_SUFFIX_RE = /^(?:第\s*[零一二三四五六七八九十百\d]+\s*[季集]|全\s*\d*\s*[季集]|合集|简体|繁体|繁體|中英|双语|雙語)/;
+
+function providerTitleMatches(field, title, want) {
+  const text = normalize(field);
+  const needle = normalize(cleanTitle(title));
+  if (!needle) return false;
+  const index = text.indexOf(needle);
+  if (index < 0) return false;
+  const before = text.slice(0, index);
+  if (before && !(/^[\p{Script=Han} ]+ $/u.test(before) && !CJK_RE.test(needle))) return false;
+  const after = text.slice(index + needle.length);
+  if (!after) return true;
+  if (providerChineseEpisode(text, [title], want) !== null) return true;
+  const suffix = after.trimStart();
+  if (PROVIDER_CJK_SUFFIX_RE.test(suffix)) return true;
+  return after.startsWith(' ') && (
+    PROVIDER_SUFFIX_RE.test(suffix.split(' ')[0]) ||
+    (!CJK_RE.test(needle) && CJK_RE.test(suffix.split(' ')[0]))
+  );
+}
+
+// Some releases use 越狱1.ass instead of 越狱第1集. Only interpret a
+// trailing number as an episode when it directly follows a known CJK title.
+function providerChineseEpisode(text, titles, want) {
+  if (want.type !== 'series' || !want.episode) return null;
+  for (const title of titles) {
+    const needle = normalize(cleanTitle(title));
+    if (!CJK_RE.test(needle) || !text.startsWith(needle)) continue;
+    const match = text.slice(needle.length).match(/^\s*(\d{1,3})(?:$| (?=(?:srt|ass|ssa|vtt|sup)$))/);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+export function providerIdentity(primary, fields, want) {
+  const titles = [...want.titles, ...(want.aliases || [])].filter(Boolean);
+  if (!titles.some((title) => providerTitleMatches(primary, title, want))) return null;
+  const ranks = [];
+  for (const field of fields.filter(Boolean)) {
+    if (looksNotFilm(field)) return null;
+    // Strip an actual title before extracting dates (e.g. 1923 is a title).
+    const text = normalize(field);
+    const title = titles.map((value) => normalize(cleanTitle(value)))
+      .filter((value) => text === value || text.startsWith(`${value} `))
+      .sort((a, b) => b.length - a.length)[0];
+    const year = [...yearsIn(title ? text.slice(title.length) : field)][0];
+    if (want.year && year && Math.abs(Number(year) - Number(want.year)) > 1) return null;
+    const info = episodeInfo(field);
+    const season = info.season ?? seasonInfo(field);
+    if (want.season != null && season !== null && season !== Number(want.season)) return null;
+    if (want.type === 'movie' && (season !== null || info.episode !== null || info.pack || isWholeShow(field))) return null;
+    const episode = info.episode ?? providerChineseEpisode(text, titles, want);
+    const rank = episodeRank({ haystack: field }, want);
+    // Don't let a pack marker in another field mask a conflicting episode.
+    if (rank === null || (want.episode && episode !== null && episode !== Number(want.episode))) return null;
+    ranks.push(episode !== null && want.episode ? 0 : rank);
+  }
+  return ranks.includes(0) ? 0 : ranks.includes(3) ? 3 : 2;
+}
+
 export { CJK_RE };
