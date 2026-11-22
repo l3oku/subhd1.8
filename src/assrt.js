@@ -20,7 +20,7 @@ import { cleanText, parseVideoId } from './parse.js';
 import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import { extOfUrl, loadArchive } from './files.js';
-import { isWholeShow, normalize, providerIdentity, seasonInfo } from './match.js';
+import { checkIdentity, episodeRank, isWholeShow, normalize, seasonInfo } from './match.js';
 import { isProxyEnabled, proxyFetchBinary, proxyFetchText } from './proxy-cf.js';
 import { aliasesFor } from './aliases.js';
 
@@ -452,12 +452,13 @@ export async function assrtSubtitles({ type, id, baseUrl }) {
     }
     for (const item of items) {
       if (seen.has(item.id)) continue;
-      // Only the leading work title establishes identity, not a release-name suffix.
-      const primary = String(item.title || '').split('/')[0];
-      const rank = providerIdentity(primary, [item.title, item.version, item.filename, item.matchedText], want);
-      if (rank === null) continue;
+      // 射手的条目名是「片名/副标题」：片名只出现在后面（发布名里夹着别的片名）的不算
+      const identity = checkIdentity({ haystack: assrtHaystack(item), headOnly: true, head: item.title || '' }, want);
+      if (!identity.ok) continue;
+      const rank = episodeRank({ haystack: assrtHaystack(item) }, want);
+      if (rank === null) continue; // 明确是别的集
       seen.add(item.id);
-      rows.push({ ...item, rank });
+      rows.push({ ...item, score: identity.score, rank });
     }
   }
 
@@ -466,7 +467,7 @@ export async function assrtSubtitles({ type, id, baseUrl }) {
     throw new Error('射手（伪）所有搜索都失败了');
   }
 
-  rows.sort((a, b) => a.rank - b.rank || b.downloads - a.downloads);
+  rows.sort((a, b) => a.rank - b.rank || b.score - a.score || b.downloads - a.downloads);
 
   const wanted = rows.slice(0, config.assrt.maxResults);
   // 详情页要逐个取（网页没有批量接口）：只有搜索页没给语言 / 格式时才值得再问一次

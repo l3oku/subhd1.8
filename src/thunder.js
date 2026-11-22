@@ -16,12 +16,14 @@ import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import {
   checkIdentity,
+  cjkTrailingNumber,
   cleanTitle,
   episodeInfo,
+  episodeRank,
   firstYear,
-  isHashName,
+  isTruncatedName,
   isWholeShow,
-  providerIdentity,
+  looksNotFilm,
   normalize,
   seasonInfo,
 } from './match.js';
@@ -413,7 +415,7 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
 
   const year = firstYear(meta.releaseInfo);
   const aliases = aliasesFor(meta.name);
-  const want = { titles: [meta.name, meta.originalName].filter(Boolean), aliases, year, type, season, episode };
+  const want = { titles: [meta.name], aliases, year, type, season, episode };
 
   // ── 1) 搜索：英文名 / 中文译名 / 带季集或年份。
   //    照抄 xunlei-subtitle 的做法 —— 站点是模糊搜索，**关键词里带上季集号或年份，它自己就能
@@ -448,11 +450,10 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
       continue;
     }
     if (found.length === 0) continue;
-    const screened = selectThunderItems(found, want);
-    const hits = screened.length;
+    const hits = found.filter((item) => matchesResolvedTitle(item, meta.name, aliases)).length;
     if (hits > bestHits) {
       bestHits = hits;
-      items = screened;
+      items = found;
       usedQuery = query;
     }
     // 已经拿到足够多「片名对得上」的结果，不用再试
@@ -468,14 +469,52 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
     const refinedQuery = [resolvedTitle, marker || (year ? String(year) : '')].filter(Boolean).join(' ');
     try {
       const refined = await searchThunder(refinedQuery);
-      items = mergeByUrl(items, selectThunderItems(refined, want));
+      items = mergeByUrl(items, refined);
     } catch {
       // 这一搜失败不影响主结果
     }
   }
 
-  logSource('thunder', `${id} 搜索「${usedQuery}」留下 ${items.length} 条可信结果`);
-  const entries = dedupeByUrl(items).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, want));
+  // ── 3) 轻度防御（不是「严格过滤」）：站点已经把搜索词解析成一部片子了，正常情况下整份结果
+  //    都是那一部。这里只请出去三类东西：别的集、别的季、别的片子（片名完全对不上）。
+  //    **全被请出去就退回原列表** —— 有总比空手强（这是参考项目 selectItems 的原则）。
+  const kept = [];
+  for (const item of items) {
+    if (isTruncatedName(item.name)) continue;
+    if (looksNotFilm(`${item.name || ''} ${item.simple_name || ''}`)) continue;
+
+    const haystack = thunderHaystack(item);
+    const info = episodeInfo(`${item.name || ''} ${item.simple_name || ''}`);
+
+    // 季/集：站点给了集号就对一下，没给（整季包、整部剧）就留着
+    if (episode && info.episode !== null && Number(info.episode) !== Number(episode)) continue;
+    if (season && info.season !== null && Number(info.season) !== Number(season)) continue;
+    // 剧集里「权力的游戏8.ass」这种中文名+数字 = 第 8 集
+    if (type === 'series' && episode) {
+      const trailing = cjkTrailingNumber(String(item.name || '').replace(/\.[a-z0-9]{2,4}$/i, ''));
+      if (trailing && info.episode === null && trailing.number !== Number(episode)) continue;
+    }
+    // 片名：只要「和这部片沾边」就留（最长公共片段 / 整串）。完全无关的才请出去。
+    if (checkIdentity({ haystack, fileName: item.name }, want).ok === false) {
+      // 站点自己标的中文名对得上也算（simple_name 里那截片名就是站点给的归属）
+      if (!matchesResolvedTitle(item, meta.name, aliases)) continue;
+    }
+    kept.push(item);
+  }
+
+  const selected = kept.length > 0 ? kept : items.filter((item) => !isTruncatedName(item.name));
+
+  // 最后一道闸：留下的条目里必须有「片名整串对上」的。只有那种靠公共片段勉强沾边的，说明站点
+  // 根本没有这部片 —— 宁可不显示，也别端一堆别的片子的字幕上去。
+  //   反例：迅雷里没有《The Greatest》(2026)，只搜 `The Greatest` 会给回 14 条 2024 年的同名片。
+  const strong = selected.filter((item) => isStrongMatch(item, meta.name, aliases, year));
+  if (strong.length === 0) {
+    logSource('thunder', `${id} 没有可信结果（${selected.length} 条都只是勉强沾边），返回空`);
+    return [];
+  }
+  logSource('thunder', `${id} 搜索「${usedQuery}」拿到 ${items.length} 条，留下 ${strong.length} 条`);
+
+  const entries = dedupeByUrl(strong).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, { ...want, aliases }));
   return entries.map((entry) => thunderTrack(entry, { baseUrl, season, episode }));
 }
 
@@ -513,12 +552,44 @@ const dedupeByUrl = (items) => {
   });
 };
 
-function selectThunderItems(items, want) {
-  return items.filter((item) => {
-    if (!item.name || isHashName(item.name)) return false;
-    const parsed = parseSimpleName(item.simple_name);
-    const work = [parsed.work, parsed.year].filter(Boolean).join(' ');
-    // A provider label cannot rescue a wrong-title release filename.
-    return providerIdentity(item.name, [item.name, work], want) !== null;
+/**
+ * 「强匹配」：片名整串出现在文件名或站点给的片名里，且年份不冲突。
+ * 这是判断「站点到底有没有这部片」的依据 —— 靠公共片段沾边的不算。
+ */
+function isStrongMatch(item, title, aliases, year) {
+  const text = normalize(`${item.name || ''} ${item.simple_name || ''}`);
+  const candidates = [title, ...(aliases || [])].filter(Boolean);
+  const hit = candidates.some((name) => {
+    const needle = normalize(name);
+    if (needle.length < 2) return false;
+    // 片名必须是「完整的一段」，不能是长句里的一截：
+    //   The Greatest.srt / The Greatest (2026) / The.Greatest.S01E01 → 认
+    //   The_Greatest_Tomb_On_Earth / Sia - The Greatest / 50 of the greatest MOVIE QUOTES → 不认
+    // 做法：在名字里找到片名，看它前后是什么 —— 前后只能是分隔符、季集、年份、语言或中文。
+    const index = text.indexOf(needle);
+    if (index < 0) return false;
+    const before = text.slice(0, index).trim();
+    const after = text.slice(index + needle.length).trim();
+    const okBefore = !before || /^(s\d{1,2}|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2})$/.test(before.split(' ').pop() || '')
+      || /[\u3400-\u4dbf\u4e00-\u9fff]$/.test(before);
+    const okAfter = !after || /^(s\d{1,2}|season|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2}|\d{3,4}p|chs|cht|eng|zh|sc|tc|srt|ass|ssa|vtt)/.test(after)
+      || /^[\u3400-\u4dbf\u4e00-\u9fff]/.test(after);
+    return okBefore && okAfter;
+  });
+  if (!hit) return false;
+  if (year) {
+    const years = new Set(String(`${item.name || ''} ${item.simple_name || ''}`).match(/(?<!\d)(19|20)\d{2}(?!\d)/g) || []);
+    if (years.size > 0 && ![...years].some((value) => Math.abs(Number(value) - Number(year)) <= 1)) return false;
+  }
+  return true;
+}
+
+/** 条目自己（文件名或站点给的片名）是否就是这部片 */
+function matchesResolvedTitle(item, title, aliases) {
+  const text = `${item.name || ''} ${item.simple_name || ''}`;
+  const candidates = [title, ...(aliases || [])].filter(Boolean);
+  return candidates.some((name) => {
+    const needle = normalize(name);
+    return needle && normalize(text).includes(needle);
   });
 }
