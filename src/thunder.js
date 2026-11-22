@@ -16,14 +16,13 @@ import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import {
   checkIdentity,
-  cjkTrailingNumber,
   cleanTitle,
   episodeInfo,
   episodeRank,
   firstYear,
   isTruncatedName,
   isWholeShow,
-  looksNotFilm,
+  matchProviderRow,
   normalize,
   seasonInfo,
 } from './match.js';
@@ -148,7 +147,11 @@ async function queryThunder(name) {
   const bases = thunderBases();
   const settled = await Promise.allSettled(bases.map((base) => queryOne(base, name)));
   const ok = settled.filter((item) => item.status === 'fulfilled').map((item) => item.value);
-  if (ok.length > 0) return ok.sort((a, b) => b.length - a.length)[0];
+  if (ok.length > 0) {
+    // Keep conflicting metadata variants until the Stremio matcher can validate them.
+    const unique = new Map(ok.flat().map((row) => [JSON.stringify([row.url, row.name, row.simple_name]), row]));
+    return [...unique.values()];
+  }
   const first = settled.find((item) => item.status === 'rejected');
   throw first ? first.reason : new Error('迅雷接口没有返回');
 }
@@ -414,10 +417,10 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
   }
 
   const year = firstYear(meta.releaseInfo);
-  const aliases = aliasesFor(meta.name);
-  const want = { titles: [meta.name], aliases, year, type, season, episode };
+  const aliases = [...new Set([meta.name, meta.originalName].filter(Boolean).flatMap((name) => aliasesFor(cleanTitle(name), { exact: true })))];
+  const want = { titles: [meta.name, meta.originalName].filter(Boolean), aliases, year, type, season, episode };
 
-  // ── 1) 搜索：英文名 / 中文译名 / 带季集或年份。
+  // 搜索：英文名 / 中文译名 / 带季集或年份。
   //    照抄 xunlei-subtitle 的做法 —— 站点是模糊搜索，**关键词里带上季集号或年份，它自己就能
   //    把片子认出来**（「越狱 S01E12」「Oppenheimer 2023」）。先试最具体的写法。
   const marker = season && episode ? `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}` : '';
@@ -430,166 +433,45 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
   // 这是 EasySub 的做法：文件名里有年份和季集号，和字幕站的命名习惯一致，命中率最高。
   const fromFilename = searchQueryFromFilename(filename);
   if (fromFilename) add(fromFilename);
-  for (const base of [meta.name, ...aliases]) {
+  // Give each known name a chance before spending the small budget on variants.
+  const names = [...new Set([...want.titles, ...aliases].map(cleanTitle))].filter(Boolean);
+  for (const base of names) {
     if (marker) add(`${base} ${marker}`);
-    if (year) add(`${base} ${year}`);
     add(base);
   }
+  if (year) for (const base of names) add(`${base} ${year}`);
 
-  // 先看前几个写法各自返回多少「片名对得上」的结果，挑最多的那个用 —— 不是「有结果就停」。
-  // 实测：搜 `The Greatest` 有 14 条片名正好是 The Greatest；搜 `The Greatest S01E01` 反而
-  // 被「Greatest American Dog」这类挤掉。反过来对某些片子，带季集号才准。所以由数据决定。
-  let items = [];
-  let usedQuery = '';
-  let bestHits = 0;
-  for (const query of queries.slice(0, 4)) {
-    let found;
-    try {
-      found = await searchThunder(query);
-    } catch {
-      continue;
-    }
-    if (found.length === 0) continue;
-    const hits = found.filter((item) => matchesResolvedTitle(item, meta.name, aliases)).length;
-    if (hits > bestHits) {
-      bestHits = hits;
-      items = found;
-      usedQuery = query;
-    }
-    // 已经拿到足够多「片名对得上」的结果，不用再试
-    if (bestHits >= 8) break;
-  }
-  if (items.length === 0) return [];
-
-  // ── 2) 站点在 simple_name 里给了它自己认的中文名（「简体[SRT]奥德赛」）。拿这截中文名再搜
-  //    一遍：Cinemeta 给的是英文名，跟站点的片库对不上时（《奥德赛》《延禧攻略》），这一搜能
-  //    把漏掉的全捞回来。这是参考项目里最关键的一步。
-  const resolvedTitle = dominantSimpleTitle(items);
-  if (resolvedTitle && resolvedTitle !== usedQuery && resolvedTitle !== meta.name) {
-    const refinedQuery = [resolvedTitle, marker || (year ? String(year) : '')].filter(Boolean).join(' ');
-    try {
-      const refined = await searchThunder(refinedQuery);
-      items = mergeByUrl(items, refined);
-    } catch {
-      // 这一搜失败不影响主结果
-    }
-  }
-
-  // ── 3) 轻度防御（不是「严格过滤」）：站点已经把搜索词解析成一部片子了，正常情况下整份结果
-  //    都是那一部。这里只请出去三类东西：别的集、别的季、别的片子（片名完全对不上）。
-  //    **全被请出去就退回原列表** —— 有总比空手强（这是参考项目 selectItems 的原则）。
-  const kept = [];
-  for (const item of items) {
-    if (isTruncatedName(item.name)) continue;
-    if (looksNotFilm(`${item.name || ''} ${item.simple_name || ''}`)) continue;
-
-    const haystack = thunderHaystack(item);
-    const info = episodeInfo(`${item.name || ''} ${item.simple_name || ''}`);
-
-    // 季/集：站点给了集号就对一下，没给（整季包、整部剧）就留着
-    if (episode && info.episode !== null && Number(info.episode) !== Number(episode)) continue;
-    if (season && info.season !== null && Number(info.season) !== Number(season)) continue;
-    // 剧集里「权力的游戏8.ass」这种中文名+数字 = 第 8 集
-    if (type === 'series' && episode) {
-      const trailing = cjkTrailingNumber(String(item.name || '').replace(/\.[a-z0-9]{2,4}$/i, ''));
-      if (trailing && info.episode === null && trailing.number !== Number(episode)) continue;
-    }
-    // 片名：只要「和这部片沾边」就留（最长公共片段 / 整串）。完全无关的才请出去。
-    if (checkIdentity({ haystack, fileName: item.name }, want).ok === false) {
-      // 站点自己标的中文名对得上也算（simple_name 里那截片名就是站点给的归属）
-      if (!matchesResolvedTitle(item, meta.name, aliases)) continue;
-    }
-    kept.push(item);
-  }
-
-  const selected = kept.length > 0 ? kept : items.filter((item) => !isTruncatedName(item.name));
-
-  // 最后一道闸：留下的条目里必须有「片名整串对上」的。只有那种靠公共片段勉强沾边的，说明站点
-  // 根本没有这部片 —— 宁可不显示，也别端一堆别的片子的字幕上去。
-  //   反例：迅雷里没有《The Greatest》(2026)，只搜 `The Greatest` 会给回 14 条 2024 年的同名片。
-  const strong = selected.filter((item) => isStrongMatch(item, meta.name, aliases, year));
-  if (strong.length === 0) {
-    logSource('thunder', `${id} 没有可信结果（${selected.length} 条都只是勉强沾边），返回空`);
-    return [];
-  }
-  logSource('thunder', `${id} 搜索「${usedQuery}」拿到 ${items.length} 条，留下 ${strong.length} 条`);
-
-  const entries = dedupeByUrl(strong).slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, { ...want, aliases }));
+  const items = await selectThunderRows(queries.slice(0, 6), want);
+  logSource('thunder', `${id} 留下 ${items.length} 条可信结果`);
+  const entries = items.slice(0, config.thunder.maxResults).map((item) => thunderEntry(item, want));
   return entries.map((entry) => thunderTrack(entry, { baseUrl, season, episode }));
 }
 
-/** 站点在 simple_name 里给的片名里出现最多的那个（参考项目的 dominantTitle） */
-function dominantSimpleTitle(items) {
-  const counts = new Map();
-  for (const item of items) {
-    const work = parseSimpleName(item.simple_name).work;
-    if (!work) continue;
-    counts.set(work, (counts.get(work) || 0) + 1);
-  }
-  let best = '';
-  let bestCount = 0;
-  for (const [title, count] of counts) {
-    if (count > bestCount || (count === bestCount && title.length > best.length)) {
-      best = title;
-      bestCount = count;
+export async function selectThunderRows(queries, want, search = searchThunder) {
+  const rows = new Map();
+  for (const query of queries) {
+    let items;
+    try {
+      items = await search(query);
+    } catch {
+      continue;
     }
+    for (const item of items) {
+      const parsed = parseSimpleName(item.simple_name);
+      const title = parsed.work && [parsed.work, parsed.year].filter(Boolean).join(' ');
+      const match = matchProviderRow({ title, filename: item.name }, want);
+      if (!match) continue;
+      // Short filenames are fine when they themselves prove the identity (e.g. 沙丘.srt).
+      if (isTruncatedName(item.name) && !matchProviderRow({ filename: item.name }, want)) continue;
+      const key = item.url || item.gcid;
+      if (!key) continue;
+      const previous = rows.get(key);
+      if (!previous || match.rank < previous.rank || (match.rank === previous.rank && match.score > previous.score)) {
+        rows.set(key, { item, ...match });
+      }
+    }
+    // Wrong/unknown episodes cannot stop the query plan; keep packs as fallbacks.
+    if ([...rows.values()].filter(({ rank }) => rank === 0).length >= 8) break;
   }
-  return best;
-}
-
-const mergeByUrl = (first, second) => {
-  const seen = new Set(first.map((item) => item.url || item.gcid));
-  return [...first, ...second.filter((item) => !seen.has(item.url || item.gcid))];
-};
-
-const dedupeByUrl = (items) => {
-  const seen = new Set();
-  return items.filter((item) => {
-    const key = item.url || item.gcid;
-    if (!key || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-};
-
-/**
- * 「强匹配」：片名整串出现在文件名或站点给的片名里，且年份不冲突。
- * 这是判断「站点到底有没有这部片」的依据 —— 靠公共片段沾边的不算。
- */
-function isStrongMatch(item, title, aliases, year) {
-  const text = normalize(`${item.name || ''} ${item.simple_name || ''}`);
-  const candidates = [title, ...(aliases || [])].filter(Boolean);
-  const hit = candidates.some((name) => {
-    const needle = normalize(name);
-    if (needle.length < 2) return false;
-    // 片名必须是「完整的一段」，不能是长句里的一截：
-    //   The Greatest.srt / The Greatest (2026) / The.Greatest.S01E01 → 认
-    //   The_Greatest_Tomb_On_Earth / Sia - The Greatest / 50 of the greatest MOVIE QUOTES → 不认
-    // 做法：在名字里找到片名，看它前后是什么 —— 前后只能是分隔符、季集、年份、语言或中文。
-    const index = text.indexOf(needle);
-    if (index < 0) return false;
-    const before = text.slice(0, index).trim();
-    const after = text.slice(index + needle.length).trim();
-    const okBefore = !before || /^(s\d{1,2}|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2})$/.test(before.split(' ').pop() || '')
-      || /[\u3400-\u4dbf\u4e00-\u9fff]$/.test(before);
-    const okAfter = !after || /^(s\d{1,2}|season|ep|e\d{1,3}|\d{1,2}x\d{1,3}|(19|20)\d{2}|\d{3,4}p|chs|cht|eng|zh|sc|tc|srt|ass|ssa|vtt)/.test(after)
-      || /^[\u3400-\u4dbf\u4e00-\u9fff]/.test(after);
-    return okBefore && okAfter;
-  });
-  if (!hit) return false;
-  if (year) {
-    const years = new Set(String(`${item.name || ''} ${item.simple_name || ''}`).match(/(?<!\d)(19|20)\d{2}(?!\d)/g) || []);
-    if (years.size > 0 && ![...years].some((value) => Math.abs(Number(value) - Number(year)) <= 1)) return false;
-  }
-  return true;
-}
-
-/** 条目自己（文件名或站点给的片名）是否就是这部片 */
-function matchesResolvedTitle(item, title, aliases) {
-  const text = `${item.name || ''} ${item.simple_name || ''}`;
-  const candidates = [title, ...(aliases || [])].filter(Boolean);
-  return candidates.some((name) => {
-    const needle = normalize(name);
-    return needle && normalize(text).includes(needle);
-  });
+  return [...rows.values()].sort((a, b) => a.rank - b.rank || b.score - a.score).map(({ item }) => item);
 }

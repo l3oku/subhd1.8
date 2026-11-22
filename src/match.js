@@ -410,4 +410,73 @@ export function episodeRank(item, want) {
   return season === Number(want.season) ? 0 : 4; // 同集号、别的季
 }
 
+// Only title and filename can establish identity. Release metadata can veto or rank.
+const RELEASE_SUFFIX = /^(?:s\d{1,2}(?:e\d{1,3})?|e(?:p)?\d{1,3}|\d{1,2}x\d{1,3}|season|episode|(?:19|20)\d{2}|\d{3,4}p|4k|chs|cht|eng|en|zh|sc|tc|gb|big5|srt|ass|ssa|vtt|sup|zip|rar|7z|mkv|mp4|avi|web|webdl|webrip|bluray|bdrip|hdtv|remux|dvdrip|complete|extended|repack)$/;
+const HAN_SUFFIX = /^(?:第\s*[零一二三四五六七八九十百\d]+\s*[季集]|全\s*\d*\s*[季集]|全集|合集|简体|繁体|繁體|中英|双语|雙語)/;
+
+export function matchProviderRow({ title, filename, release = [] }, want) {
+  const names = [...new Set([...want.titles, ...(want.aliases || [])].map((value) => normalize(cleanTitle(value))).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  const split = (value) => String(value || '').split(/\s*[\/／]\s*/).filter(Boolean);
+  const fields = [...split(title), filename].filter(Boolean);
+  const evidence = (field) => {
+    const text = normalize(field);
+    for (const name of names) {
+      // ASSRT also publishes “中文名 English Title (year)” in a single segment.
+      const candidate = CJK_RE.test(name) ? text : text.replace(/^[\p{Script=Han}\d ]*\p{Script=Han}[\p{Script=Han}\d ]* /u, '');
+      const value = text.startsWith(name) ? text : candidate;
+      if (!value.startsWith(name)) continue;
+      const tail = value.slice(name.length);
+      const suffix = tail.trimStart();
+      const trailing = want.episode && CJK_RE.test(name) && suffix.match(/^(\d{1,3})(?:$| (?:srt|ass|ssa|vtt|sup)$)/);
+      if (!suffix || HAN_SUFFIX.test(suffix) || trailing || (tail.startsWith(' ') && RELEASE_SUFFIX.test(suffix.split(' ')[0]))) {
+        return { name, trailing: trailing ? Number(trailing[1]) : null };
+      }
+    }
+    return null;
+  };
+  const hits = fields.map(evidence);
+  if (!hits.some(Boolean)) return null;
+  // A nearby but different name (Friends Sex and Games, 沙丘2) is not a translation.
+  // An unrelated same-script title or filename with explicit release coordinates is also negative evidence.
+  for (const [i, field] of fields.entries()) {
+    if (hits[i]) continue;
+    const text = normalize(field);
+    if (names.some((name) => text.startsWith(`${name} `) || (CJK_RE.test(name) && text.startsWith(name)))) return null;
+    const coordinate = text.search(/(?:^| )(?:(?:19|20)\d{2}\b|s\d{1,2}(?:e\d{1,3})?\b|\d{1,2}x\d{1,3}\b|e\d{1,3}\b)|第\s*[零一二三四五六七八九十\d]+[季集]/i);
+    const prefix = coordinate > 0 ? text.slice(0, coordinate) : '';
+    if (/\p{L}/u.test(prefix) &&
+        hits.some((hit) => hit && CJK_RE.test(hit.name) === CJK_RE.test(prefix))) return null;
+  }
+  let rank = want.episode ? 2 : 0;
+  for (const field of [...fields, ...release.flatMap(split)]) {
+    if (looksNotFilm(field)) return null;
+    const hit = evidence(field);
+    let raw = field;
+    for (const titleYear of hit ? yearsIn(hit.name) : []) {
+      raw = raw.replace(new RegExp(`(?<!\\d)${titleYear}(?!\\d)`), '');
+    }
+    const info = episodeInfo(raw);
+    const season = info.season ?? seasonInfo(raw);
+    const seasonRange = raw.match(/\bS(\d{1,2})\s*[-–~]\s*S?(\d{1,2})(?![\dE])/i);
+    const episodeRange = raw.match(/(?:S\d{1,2}[ ._-]*E|第\s*)(\d{1,3})\s*[-–~至]\s*E?(\d{1,3})/i);
+    const fullSeason = raw.match(/全\s*(\d+)\s*集/);
+    const outside = (number, range) => Number(number) < Number(range[1]) || Number(number) > Number(range[2]);
+    if (want.season != null && (seasonRange ? outside(want.season, seasonRange) : season !== null && season !== Number(want.season))) return null;
+    if (want.type === 'movie' && (season !== null || info.episode !== null || info.pack || isWholeShow(raw))) return null;
+    const years = [...yearsIn(raw)];
+    // A later season's release year is not the series premiere year.
+    if (want.year && (want.type === 'movie' || season === null || season === 1) && years.length &&
+        years.every((year) => Math.abs(Number(year) - Number(want.year)) > 1)) return null;
+    const ep = info.episode ?? hit?.trailing ?? null;
+    if (want.episode) {
+      if ((episodeRange && outside(want.episode, episodeRange)) || (fullSeason && Number(want.episode) > Number(fullSeason[1]))) return null;
+      if (ep !== null && ep !== Number(want.episode)) return null;
+      if (ep !== null) rank = 0;
+      else if (rank !== 0 && (info.pack || season !== null || isWholeShow(raw))) rank = 3;
+    }
+  }
+  return { rank, score: hits.filter(Boolean).length };
+}
+
 export { CJK_RE };

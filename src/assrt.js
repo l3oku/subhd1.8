@@ -20,7 +20,7 @@ import { cleanText, parseVideoId } from './parse.js';
 import { clipMiddle, episodeSuffix } from './label.js';
 import { addonMeta } from './meta.js';
 import { extOfUrl, loadArchive } from './files.js';
-import { checkIdentity, episodeRank, isWholeShow, normalize, seasonInfo } from './match.js';
+import { checkIdentity, episodeRank, isWholeShow, matchProviderRow, normalize, seasonInfo } from './match.js';
 import { isProxyEnabled, proxyFetchBinary, proxyFetchText } from './proxy-cf.js';
 import { aliasesFor } from './aliases.js';
 
@@ -201,9 +201,9 @@ async function apiSearch(query, page = 1) {
   });
   return (body.sub?.subs || []).map((item) => ({
     id: String(item.id),
-    title: cleanText(item.videomenu || ''),
+    title: cleanText(item.videomenu || item.videoname || ''),
     version: cleanText(item.native_name || ''),
-    filename: '',
+    filename: String(item.filename || (item.filelist?.length === 1 ? item.filelist[0]?.f || item.filelist[0]?.filename : '') || ''),
     format: String(item.subtype || '').toUpperCase(),
     languages: typeof item.lang?.desc === 'string' ? item.lang.desc : '',
     source: '',
@@ -417,6 +417,10 @@ export function assrtHaystack(item) {
     .join(' ');
 }
 
+export function matchAssrtRow(item, want) {
+  return matchProviderRow({ title: item.title, filename: item.filename, release: [item.version, item.matchedText] }, want);
+}
+
 export async function assrtSubtitles({ type, id, baseUrl }) {
   const { imdbId, season, episode } = parseVideoId(id);
   if (!imdbId) return [];
@@ -425,15 +429,18 @@ export async function assrtSubtitles({ type, id, baseUrl }) {
   if (!meta || !meta.name) return [];
 
   const year = Number(String(meta.releaseInfo || '').match(/(19|20)\d{2}/)?.[0]) || null;
-  const aliases = aliasesFor(meta.name);
+  const aliases = [...new Set([meta.name, meta.originalName].filter(Boolean).flatMap((name) => aliasesFor(cleanTitle(name), { exact: true })))];
   const want = { titles: [meta.name, meta.originalName].filter(Boolean), aliases, year, type, season, episode };
 
-  // 查询顺序：英文名 → 英文名+年份 → 中文译名。
+  // 数字片名的空格查询常返回 0 条，优先已知译名，再尝试点分隔的发布名。
   // 和 SubHD 一样「每个查法都收」，而不是第一种有结果就停：同一部剧的各季包散落在不同
   // 关键词下（搜 Friends 只出 S01，搜「老友记 第二季」才出第二季的整季包），
   // 只看第一种查法就会漏掉 —— 剧集列表空得很。
+  const numeric = /^\d+(?:[ .-]+\d+)+$/.test(cleanTitle(meta.name));
   const queries = [
+    ...(numeric ? aliases : []),
     cleanTitle(meta.name),
+    ...(numeric ? [normalize(meta.name).replace(/ /g, '.')] : []),
     year ? `${cleanTitle(meta.name)} ${year}` : '',
     ...aliases,
   ].filter((query, index, list) => query && list.indexOf(query) === index);
@@ -452,13 +459,10 @@ export async function assrtSubtitles({ type, id, baseUrl }) {
     }
     for (const item of items) {
       if (seen.has(item.id)) continue;
-      // 射手的条目名是「片名/副标题」：片名只出现在后面（发布名里夹着别的片名）的不算
-      const identity = checkIdentity({ haystack: assrtHaystack(item), headOnly: true, head: item.title || '' }, want);
-      if (!identity.ok) continue;
-      const rank = episodeRank({ haystack: assrtHaystack(item) }, want);
-      if (rank === null) continue; // 明确是别的集
+      const match = matchAssrtRow(item, want);
+      if (!match) continue;
       seen.add(item.id);
-      rows.push({ ...item, score: identity.score, rank });
+      rows.push({ ...item, ...match });
     }
   }
 

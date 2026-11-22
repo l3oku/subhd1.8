@@ -25,6 +25,7 @@ export const TITLE_ALIASES = {
   prestige: ['致命魔术'],
 
   // 热门剧
+  '12 12 12': ['刑侦12'],
   'breaking bad': ['绝命毒师', '絕命毒師'],
   'game of thrones': ['权力的游戏', '冰与火之歌', '權力的遊戲'],
   'house of the dragon': ['龙之家族'],
@@ -145,7 +146,7 @@ const CJK_ALIAS_HINTS = {
   odyssey: ['奥德赛'],
 };
 
-export function aliasesFor(title) {
+export function aliasesFor(title, { exact = false } = {}) {
   const key = String(title || '')
     .toLowerCase()
     .replace(/[^\p{Script=Han}a-z0-9]+/gu, ' ')
@@ -154,6 +155,7 @@ export function aliasesFor(title) {
   if (!key) return [];
 
   const found = new Set(TITLE_ALIASES[key] || []);
+  if (exact) return [...new Set([...found, ...(CJK_ALIAS_HINTS[key] || [])])];
   for (const [needle, extra] of Object.entries(CJK_ALIAS_HINTS)) {
     if (key.includes(needle)) for (const alias of extra) found.add(alias);
   }
