@@ -208,6 +208,7 @@ export function landingPage({ baseUrl }) {
 
   <div class="hint">仅供学习交流使用，字幕版权归原作者所有。</div>
 </div>
+<dialog id="subhd-download-dialog" style="max-width:min(420px,90vw)"><p>插件无法下载这条 SubHD 字幕。请打开原站；若出现扫码弹窗，请在原站完成验证后下载。</p><a class="button" target="_blank" rel="noopener noreferrer">打开 SubHD 原站</a><form method="dialog"><button class="button">关闭</button></form></dialog>
 <script>
 const form = document.getElementById('form');
 const sourceSelect = document.getElementById('source');
@@ -246,6 +247,26 @@ copyBtn.addEventListener('click', async () => {
   setTimeout(() => { copyBtn.textContent = original; copyBtn.classList.remove('done'); }, 1600);
 });
 
+results.addEventListener('click', async (event) => {
+  const link = event.target.closest('a[data-subhd-page]');
+  if (!link || event.metaKey || event.ctrlKey || event.shiftKey) return;
+  event.preventDefault();
+  try {
+    const response = await fetch(link.href);
+    if (!response.ok) throw new Error();
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = new URL(link.href).pathname.split('/').pop();
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  } catch {
+    const dialog = document.getElementById('subhd-download-dialog');
+    dialog.querySelector('a').href = link.dataset.subhdPage;
+    if (!dialog.open) dialog.showModal();
+  }
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const query = input.value.trim();
@@ -267,7 +288,7 @@ form.addEventListener('submit', async (event) => {
         .join('');
       // SubHD：/sub/<编号> 是插件转好的文本；迅雷 / 射手(伪)：点「下载」由服务器取回来再转码
       const serverFile = entry.serverFile || entry.downloadUrl;
-      const download = serverFile ? '<a class="button" href="' + esc(serverFile) + '">下载字幕</a>' : '';
+      const download = serverFile ? '<a class="button" href="' + esc(serverFile) + (source === 'subhd' && entry.pageUrl ? '" data-subhd-page="' + esc(entry.pageUrl) : '') + '">下载字幕</a>' : '';
       const raw = entry.rawUrl ? '<a class="ghost" href="' + esc(entry.rawUrl) + '">原始文件</a>' : '';
       const page = entry.pageUrl ? '<a class="ghost" href="' + esc(entry.pageUrl) + '" target="_blank" rel="noreferrer">站点页面</a>' : '';
       return '<li class="item">' +
