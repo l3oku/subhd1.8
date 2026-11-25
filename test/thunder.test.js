@@ -97,6 +97,12 @@ test('thunderEntry + thunderTrack produce a SubHD-shaped track', () => {
   assert.equal(Buffer.from(encoded, 'base64url').toString(), item.url);
   assert.match(track.label, /S02E03/);
   assert.equal(track.lang, 'chi');
-  assert.equal(track.label, '【简中】 ' + entry.filename);
+  assert.equal(track.label, '【简中】 Show.S02E03.1080p.chs');
   assert.match(track.id, /thunder-ABCDEF123456$/);
+});
+
+test('Thunder displays a short serial when the filename contains one', () => {
+  const track = thunderTrack({ filename: 'SNOS-306-zh.srt', languages: ['简体'], formats: ['SRT'], fileUrl: 'https://example.com/sub.srt', sid: 'unique' }, { baseUrl: 'https://addon.test' });
+  assert.equal(track.label, '【简中】 SNOS-306');
+  assert.equal(track.lang, 'chi');
 });

@@ -350,7 +350,11 @@ export function thunderEntry(item, wanted) {
 export function thunderTrack(entry, { baseUrl, season, episode }) {
   const lang = thunderLanguage(entry.languages);
   const badge = lang.label === '简体' ? '简中' : lang.label === '繁体' ? '繁中' : lang.label;
-  const label = `【${badge}】 ${entry.filename || entry.workName || '迅雷字幕'}`;
+  const filename = entry.filename || '';
+  const serial = filename.match(/(?:^|[^a-z0-9])([a-z]{2,9})[-_ ](\d{3,6})(?![a-z0-9])/i);
+  const name = serial ? `${serial[1].toUpperCase()}-${serial[2]}` :
+    clipMiddle(filename.replace(/\.[a-z0-9]{2,4}$/i, '') || entry.workName || '迅雷字幕', 32);
+  const label = `【${badge}】 ${name}`;
 
   // 点开时用的地址：走插件自己的 /thunder/<url64>，服务器替用户去 CDN 取
   //（Vercel 上 CDN 常常连不上、取下来还要统一转 UTF-8，见 files.js）。
