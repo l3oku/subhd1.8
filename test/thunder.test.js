@@ -95,8 +95,8 @@ test('thunderEntry + thunderTrack produce a SubHD-shaped track', () => {
   // 走自己的代理路由：base64url 里就是那条直链
   const encoded = track.url.split('/thunder/')[1].split('.')[0];
   assert.equal(Buffer.from(encoded, 'base64url').toString(), item.url);
-  assert.match(track.label, /剧名/);
   assert.match(track.label, /S02E03/);
-  assert.match(track.lang, /简体 · 迅雷 · SRT/);
+  assert.equal(track.lang, 'chi');
+  assert.equal(track.label, '【简中】 ' + entry.filename);
   assert.match(track.id, /thunder-ABCDEF123456$/);
 });

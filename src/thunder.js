@@ -349,26 +349,8 @@ export function thunderEntry(item, wanted) {
 /** 一条迅雷结果 → Stremio 的字幕轨道 */
 export function thunderTrack(entry, { baseUrl, season, episode }) {
   const lang = thunderLanguage(entry.languages);
-  const format = entry.formats[0] || 'SRT';
-  const labelName = clipMiddle(entry.workName || '迅雷字幕', 48);
-
-  // 行标题和 SubHD 那一路同规则：片名 · 第N集 · 字幕自己的名字
-  // （没有集号时不要留一个空段，否则会出现「沙丘2 ·  · 文件名」这种双分隔符）
-  const parts = [labelName];
-  if (episodeSuffix(labelName, { season: entry.season, episode: entry.episode })) {
-    parts.push(episodeSuffix(labelName, { season: entry.season, episode: entry.episode }));
-  }
-  if (entry.filename && entry.filename !== entry.workName) parts.push(clipMiddle(entry.filename, 72));
-  const label = clipMiddle(parts.filter(Boolean).join(' · '), 132) || '迅雷字幕';
-
-  // 第二行：语言 · 迅雷 · 格式 · 集号 / 整季合集 / 整部剧
-  const meta = [lang.label, '迅雷', format];
-  if (episode) {
-    if (isWholeShow(entry.haystack || '') || /全\s*\d+\s*[季集]|Complete\s+Series/i.test(entry.filename || '')) meta.push('整季合集');
-    else if (entry.episode) meta.push(episodeSuffix(labelName, { season, episode }) || `第${episode}集`);
-    else if (seasonInfo(entry.haystack || '') !== null) meta.push('整季合集');
-    else meta.push('整部/整剧');
-  }
+  const badge = lang.label === '简体' ? '简中' : lang.label === '繁体' ? '繁中' : lang.label;
+  const label = `【${badge}】 ${entry.filename || entry.workName || '迅雷字幕'}`;
 
   // 点开时用的地址：走插件自己的 /thunder/<url64>，服务器替用户去 CDN 取
   //（Vercel 上 CDN 常常连不上、取下来还要统一转 UTF-8，见 files.js）。
@@ -376,9 +358,9 @@ export function thunderTrack(entry, { baseUrl, season, episode }) {
   const url = `${baseUrl}/thunder/${base64url(entry.fileUrl)}.${(entry.formats[0] || 'srt').toLowerCase()}`;
 
   return {
-    id: `${clipMiddle(label, 60)} · ${lang.label} · thunder-${entry.sid}`,
+    id: `${label} · thunder-${entry.sid}`,
     url,
-    lang: meta.join(' · '),
+    lang: lang.code.startsWith('zh') ? 'chi' : lang.code,
     label,
   };
 }
