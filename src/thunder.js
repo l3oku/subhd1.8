@@ -41,7 +41,7 @@ const LANG_RULES = [
   [/英语|英語|english|(^|[^a-z])(eng|en)([^a-z]|$)/i, '英语', 'en'],
   [/日语|日語|japanese|(^|[^a-z])(jpn|ja|jp)([^a-z]|$)/i, '日语', 'ja'],
   [/韩语|韓語|korean|(^|[^a-z])(kor|kr)([^a-z]|$)/i, '韩语', 'ko'],
-  [/zho|chi|中文|字幕/i, '简体', 'zh-Hans'],
+  [/\b(?:zho|chi|zh)\b|中文/i, '简体', 'zh-Hans'],
 ];
 
 export function thunderLanguage(languages) {
@@ -61,10 +61,10 @@ export function thunderLanguage(languages) {
   }
   // 中英双语的包里简繁都有，第二行只写一个「中英双语」，别写成「中英双语/简体」
   const ordered = labels.includes('中英双语') ? labels.filter((label) => label === '中英双语') : labels;
-  const shown = ordered.length > 0 ? ordered.join('/') : '简体';
+  const shown = ordered.length > 0 ? ordered.join('/') : '语言未知';
   // Stremio 的 lang 字段只拿来做排序 / 默认选择：只有一种语言时如实报，中英双语按简体中文报
   const only = codes.length === 1 ? codes[0] : null;
-  const stremioLang = only && ['en', 'ja', 'ko', 'zh-Hant'].includes(only) ? only : 'zh';
+  const stremioLang = only && ['en', 'ja', 'ko', 'zh-Hant'].includes(only) ? only : codes.length ? 'zh' : 'und';
   return { label: shown, code: stremioLang };
 }
 
@@ -447,6 +447,11 @@ export async function thunderSubtitles({ type, id, baseUrl, filename = '' }) {
   return entries.map((entry) => thunderTrack(entry, { baseUrl, season, episode }));
 }
 
+// Explicit non-Chinese release tags override unreliable provider language labels.
+export function hasForeignReleaseTag(name) {
+  return /(?:^|[ ._(-])(?:rus|russian|greek|ell|isl|icelandic|spa|spanish|ita|italian|fre|fra|french|ger|deu|german|por|portuguese)(?=[ ._)-]|$)/i.test(String(name || '').replace(/\.(?:srt|ass|ssa|vtt)$/i, '')) || /[._-](?:ru|gr|is|es|pt)\.(?:srt|ass|ssa|vtt)$/i.test(name || '');
+}
+
 export async function selectThunderRows(queries, want, search = searchThunder) {
   const rows = new Map();
   for (const query of queries) {
@@ -460,7 +465,7 @@ export async function selectThunderRows(queries, want, search = searchThunder) {
       const parsed = parseSimpleName(item.simple_name);
       const title = parsed.work && [parsed.work, parsed.year].filter(Boolean).join(' ');
       const match = matchProviderRow({ title, filename: item.name }, want);
-      if (!match) continue;
+      if (!match || hasForeignReleaseTag(item.name) || (want.episode && match.rank === 2)) continue;
       // Short filenames are fine when they themselves prove the identity (e.g. 沙丘.srt).
       if (isTruncatedName(item.name) && !matchProviderRow({ filename: item.name }, want)) continue;
       const key = item.url || item.gcid;
