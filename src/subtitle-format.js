@@ -120,6 +120,13 @@ function decodeCandidate(bytes, encoding) {
 // 保留前一个候选，而 utf-8 排在最前面）。
 export function decodeTextBuffer(buffer) {
   const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  // A BOM or valid non-ASCII UTF-8 is stronger evidence than character scoring.
+  const bom = bytes.subarray(0, 3).toString('hex');
+  const encoding = bom.startsWith('fffe') ? 'utf-16le' : bom.startsWith('feff') ? 'utf-16be' : 'utf-8';
+  try {
+    const text = new TextDecoder(encoding, { fatal: true }).decode(bytes);
+    return { encoding, text, score: scoreDecodedText(text) };
+  } catch { /* Legacy encodings still need candidate scoring. */ }
   let best = null;
 
   for (const encoding of DECODER_CANDIDATES) {
